@@ -44,6 +44,8 @@ const els = {
   compareList: document.querySelector("#compareList"),
   reportText: document.querySelector("#reportText"),
   resultsFile: document.querySelector("#resultsFile"),
+  quickTask: document.querySelector("#quickTask"),
+  quickDetail: document.querySelector("#quickDetail"),
 };
 
 function resizeCanvas() {
@@ -137,25 +139,35 @@ function ignitionPoints() {
 }
 
 function payload() {
+  const ring = state.polygon.map((point) => [Number(point.lon.toFixed(6)), Number(point.lat.toFixed(6))]);
+  if (ring.length > 0) {
+    const first = ring[0];
+    const last = ring[ring.length - 1];
+    if (first[0] !== last[0] || first[1] !== last[1]) {
+      ring.push([...first]);
+    }
+  }
   return {
-    protected_polygon: state.polygon.map((point) => [Number(point.lon.toFixed(6)), Number(point.lat.toFixed(6))]),
+    protected_polygon: {
+      type: "Polygon",
+      coordinates: [ring],
+    },
     simulation_radius_m: state.simulationRadiusM,
     ignition_distance_m: state.ignitionDistanceM,
-    wind_speed_mps: state.windSpeedMps,
-    scenario_count: 8,
-    optimization_goal: state.optimizationGoal,
-    success_condition: state.successCondition,
+    cell_size_m: 30,
+    crs: "EPSG:5070",
+    landfire_version: "LF2023",
   };
 }
 
 function drawBackground(rect) {
-  ctx.fillStyle = "#d9e5dc";
+  ctx.fillStyle = "#dbe6d8";
   ctx.fillRect(0, 0, rect.width, rect.height);
 
   ctx.save();
   ctx.translate(rect.width / 2, rect.height / 2);
   ctx.rotate(-0.18);
-  ctx.fillStyle = "#87a96f";
+  ctx.fillStyle = "#8cab69";
   for (let row = -16; row <= 16; row += 1) {
     for (let col = -16; col <= 16; col += 1) {
       if ((row + col) % 3 === 0) ctx.fillRect(col * 90, row * 72, 68, 46);
@@ -172,7 +184,7 @@ function drawBackground(rect) {
   ctx.restore();
 
   ctx.strokeStyle = "#6aa6ba";
-  ctx.lineWidth = 18;
+  ctx.lineWidth = 20;
   ctx.lineCap = "round";
   ctx.beginPath();
   ctx.moveTo(rect.width * 0.08, rect.height * 0.72);
@@ -180,8 +192,8 @@ function drawBackground(rect) {
   ctx.bezierCurveTo(rect.width * 0.82, rect.height * 0.47, rect.width * 0.9, rect.height * 0.5, rect.width * 1.04, rect.height * 0.38);
   ctx.stroke();
 
-  ctx.strokeStyle = "#666e68";
-  ctx.lineWidth = 7;
+  ctx.strokeStyle = "#5c625d";
+  ctx.lineWidth = 8;
   ctx.beginPath();
   ctx.moveTo(rect.width * 0.04, rect.height * 0.25);
   ctx.lineTo(rect.width * 0.96, rect.height * 0.18);
@@ -203,9 +215,9 @@ function drawCircle(origin, radiusM, stroke, dash = []) {
 function drawPolygon() {
   if (!state.polygon.length) return;
   const pts = state.polygon.map(project);
-  ctx.fillStyle = "rgba(27, 111, 90, 0.28)";
-  ctx.strokeStyle = "#1b6f5a";
-  ctx.lineWidth = 3;
+  ctx.fillStyle = "rgba(23, 107, 77, 0.32)";
+  ctx.strokeStyle = "#176b4d";
+  ctx.lineWidth = 4;
   ctx.beginPath();
   pts.forEach((point, idx) => {
     if (idx === 0) ctx.moveTo(point.x, point.y);
@@ -217,15 +229,15 @@ function drawPolygon() {
 
   pts.forEach((point, idx) => {
     ctx.fillStyle = "#ffffff";
-    ctx.strokeStyle = "#1b6f5a";
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#176b4d";
+    ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.arc(point.x, point.y, 6, 0, Math.PI * 2);
+    ctx.arc(point.x, point.y, 8, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-    ctx.fillStyle = "#1b6f5a";
+    ctx.fillStyle = "#176b4d";
     ctx.font = "700 11px Inter, sans-serif";
-    ctx.fillText(String(idx + 1), point.x + 9, point.y - 9);
+    ctx.fillText(String(idx + 1), point.x + 12, point.y - 11);
   });
 }
 
@@ -321,6 +333,7 @@ function updatePanels() {
   els.vertexCount.textContent = String(state.polygon.length);
   els.areaEstimate.textContent = formatArea(polygonAreaM2(state.polygon));
   els.payloadPreview.textContent = JSON.stringify(payload(), null, 2);
+  updateGuidance();
 
   els.simulationRadiusValue.textContent = formatMeters(state.simulationRadiusM);
   els.ignitionDistanceValue.textContent = formatMeters(state.ignitionDistanceM);
@@ -356,8 +369,8 @@ function renderScenarios() {
 
 function defaultScenarios() {
   return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"].map((label, idx) => ({
-    title: `Scenario ${idx + 1} · ${label}`,
-    detail: idx < 6 ? "Patch entry likely without firebreak" : "Lower exposure",
+    title: `Test fire ${idx + 1} from ${label}`,
+    detail: idx < 6 ? "Likely to reach the farm without added clearing" : "Lower exposure in this preview",
   }));
 }
 
@@ -387,7 +400,7 @@ function renderOptimization() {
   segments.forEach((segment) => {
     const card = document.createElement("article");
     card.className = "scenario-card";
-    card.innerHTML = `<strong>${segment.segment_id}</strong><span>${formatMeters(segment.length_m || 0)} · ${formatMoney(segment.estimated_cost || 0)}</span>`;
+    card.innerHTML = `<strong>${segment.segment_id}</strong><span>${formatMeters(segment.length_m || 0)} clearing · ${formatMoney(segment.estimated_cost || 0)} estimated</span>`;
     els.segmentList.append(card);
   });
 
@@ -400,7 +413,7 @@ function renderOptimization() {
   layouts.forEach((layout) => {
     const card = document.createElement("article");
     card.className = "compare-card";
-    card.innerHTML = `<strong>${layout.layout_id}</strong><span>Score ${Math.round(layout.score || 0).toLocaleString()} · ${formatMeters(layout.firebreak_length_m || 0)} · ${formatMoney(layout.estimated_cost || 0)}</span>`;
+    card.innerHTML = `<strong>${layout.layout_id}</strong><span>Score ${Math.round(layout.score || 0).toLocaleString()} · ${formatMeters(layout.firebreak_length_m || 0)} clearing · ${formatMoney(layout.estimated_cost || 0)}</span>`;
     els.compareList.append(card);
   });
 }
@@ -409,26 +422,60 @@ function renderReport() {
   const data = payload();
   const baseline = state.optimization?.baseline_result || state.baseline || {};
   const recommended = state.optimization?.recommended_layout_id || "preview_layout";
+  const boundaryPoints = Math.max(0, data.protected_polygon.coordinates[0].length - 1);
   els.reportText.value = [
-    "AgriShield simulation report",
+    "AgriShield farm fire planning report",
     "",
-    `Protected polygon vertices: ${data.protected_polygon.length}`,
-    `Simulation radius: ${data.simulation_radius_m} m`,
-    `Ignition distance: ${data.ignition_distance_m} m`,
-    `Wind speed: ${data.wind_speed_mps} m/s`,
-    `Optimization goal: ${data.optimization_goal}`,
+    `Farm boundary points: ${boundaryPoints}`,
+    `Area checked around farm: ${data.simulation_radius_m} m`,
+    `Test fires start: ${data.ignition_distance_m} m from farm center`,
+    `Wind speed: ${state.windSpeedMps} m/s`,
+    `Planning goal: ${readableGoal(state.optimizationGoal)}`,
     "",
-    `Baseline failed scenarios: ${baseline.scenarios_failed ?? "pending"}`,
-    `Baseline burned area inside patch: ${Math.round(baseline.burned_area_inside_patch_m2 || 0).toLocaleString()} m²`,
-    `Recommended layout: ${recommended}`,
+    `Risky test fires without added breaks: ${baseline.scenarios_failed ?? "pending"}`,
+    `Farm area at risk in preview: ${Math.round(baseline.burned_area_inside_patch_m2 || 0).toLocaleString()} m²`,
+    `Recommended firebreak plan: ${recommended}`,
     "",
-    "Backend handoff JSON is available in the Setup view.",
+    "Use imported backend results before making field decisions.",
   ].join("\n");
+}
+
+function readableGoal(goal) {
+  return {
+    minimize_firebreak_length: "shortest useful firebreak",
+    minimize_cost: "lowest estimated cost",
+    maximize_risk_reduction: "most protection",
+  }[goal] || goal;
+}
+
+function updateGuidance() {
+  const steps = document.querySelectorAll(".step");
+  const activeIndex = state.polygon.length < 3 ? 0 : state.runState === "Draft" ? 1 : 2;
+  steps.forEach((step, index) => step.classList.toggle("active", index === activeIndex));
+
+  if (state.polygon.length < 3) {
+    els.quickTask.textContent = "Mark your farm boundary";
+    els.quickDetail.textContent = `${Math.max(0, 3 - state.polygon.length)} more point${3 - state.polygon.length === 1 ? "" : "s"} needed before checking risk.`;
+    els.mapHint.textContent = "Tap the map to add farm corner points";
+    return;
+  }
+
+  if (state.runState === "Draft") {
+    els.quickTask.textContent = "Ready to check fire risk";
+    els.quickDetail.textContent = "Your farm boundary is set. Run a preview or export this job for the backend.";
+    els.mapHint.textContent = "Tap Check risk to preview fire paths";
+    return;
+  }
+
+  els.quickTask.textContent = "Review the firebreak plan";
+  els.quickDetail.textContent = "Switch tabs to see fire risk, recommended clearing, options, and the report.";
+  els.mapHint.textContent = "Use tabs to review risk and firebreaks";
 }
 
 function runPreviewSimulation() {
   if (state.polygon.length < 3) {
-    els.mapHint.textContent = "Draw at least three vertices first";
+    els.mapHint.textContent = "Add at least three farm boundary points first";
+    updateGuidance();
     return;
   }
   const area = polygonAreaM2(state.polygon);
@@ -459,6 +506,7 @@ function setView(view) {
   state.activeView = view;
   document.querySelectorAll(".tab").forEach((tab) => tab.classList.toggle("active", tab.dataset.view === view));
   document.querySelectorAll(".view-panel").forEach((panel) => panel.classList.toggle("hidden", panel.dataset.panel !== view));
+  updateGuidance();
   draw();
 }
 
@@ -474,6 +522,16 @@ function addSamplePolygon() {
   draw();
 }
 
+function undoPoint() {
+  if (!state.polygon.length) return;
+  state.polygon.pop();
+  state.baseline = null;
+  state.optimization = null;
+  state.runState = "Draft";
+  updatePanels();
+  draw();
+}
+
 function exportJson(filename, data) {
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -482,6 +540,32 @@ function exportJson(filename, data) {
   link.download = filename;
   link.click();
   URL.revokeObjectURL(url);
+}
+
+async function saveBackendJob() {
+  if (state.polygon.length < 3) {
+    els.mapHint.textContent = "Add at least three farm boundary points first";
+    updateGuidance();
+    return;
+  }
+  try {
+    const response = await fetch("/api/jobs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload()),
+    });
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `HTTP ${response.status}`);
+    }
+    const result = await response.json();
+    state.runState = "Job saved";
+    els.mapHint.textContent = `Saved backend job: ${result.job_json}`;
+    updatePanels();
+  } catch (error) {
+    els.mapHint.textContent = "Backend save needs web/server.py, or use Download job";
+    console.error(error);
+  }
 }
 
 function bindEvents() {
@@ -510,9 +594,14 @@ function bindEvents() {
     updatePanels();
     draw();
   });
+  document.querySelector("#undoPoint").addEventListener("click", undoPoint);
   document.querySelector("#samplePolygon").addEventListener("click", addSamplePolygon);
-  document.querySelector("#fitMap").addEventListener("click", draw);
+  document.querySelector("#fitMap")?.addEventListener("click", draw);
   document.querySelector("#runSimulation").addEventListener("click", runPreviewSimulation);
+  document.querySelector("#mobileSample").addEventListener("click", addSamplePolygon);
+  document.querySelector("#mobileUndo").addEventListener("click", undoPoint);
+  document.querySelector("#mobileRun").addEventListener("click", runPreviewSimulation);
+  document.querySelector("#saveBackendJob").addEventListener("click", saveBackendJob);
   document.querySelector("#exportJob").addEventListener("click", () => exportJson("agrishield-job.json", payload()));
   document.querySelector("#copyPayload").addEventListener("click", async () => {
     await navigator.clipboard.writeText(JSON.stringify(payload(), null, 2));

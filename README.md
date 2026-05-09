@@ -16,7 +16,7 @@ The pipeline (Stages 1-7) is fully implemented and tested against synthetic data
 **Live-API status:**
 
 - 3DEP DEM fetcher: endpoint verified live; should work end-to-end
-- LFPS fetcher: layer codes verified live as `LF2022_FBFM40` etc., **but the job-submit endpoint URL needs further discovery** — the assumed `https://lfps.usgs.gov/api/job/submitJob` returns 404. The current LFPS frontend (Next.js app at lfps.usgs.gov) does not expose the legacy ArcGIS GP endpoint that the fetcher is written against. See "Known integration gap" below.
+- LFPS fetcher: job endpoint surface verified as `/api/job/submit` and `/api/job/status`; live runs still require a real `LANDFIRE_EMAIL`
 
 ## Quick start
 
@@ -37,7 +37,22 @@ uv run ruff check src tests
 The project includes a no-build browser UI in `web/` for project setup, polygon drawing,
 scenario settings, baseline/firebreak visualization, comparison, and JSON handoff.
 
-Run it locally:
+Run the browser UI with the local backend bridge:
+
+```bash
+uv run python web/server.py
+```
+
+Open:
+
+```text
+http://127.0.0.1:4173/
+```
+
+The local bridge serves the UI and lets the **Save backend job** button write
+validated backend job files under `jobs/ui/<timestamp>/`.
+
+For a static UI only:
 
 ```bash
 python3 -m http.server 4173 --bind 127.0.0.1 --directory web
@@ -59,7 +74,7 @@ uv run wildfire-preproc optimize-firebreaks jobs/YOUR_RUN/preprocessed \
   --baseline-dir jobs/YOUR_RUN/preprocessed/elmfire_no_firebreak
 ```
 
-The bundled sample AOI and the `wildfire-preproc sample` command are wired up but will fail at the LFPS fetch step until the submit URL is resolved (see below).
+The bundled sample AOI and the `wildfire-preproc sample` command are wired up for live LFPS+3DEP runs. Set `LANDFIRE_EMAIL` before running against LFPS.
 
 ## End-to-end fire simulation app
 
@@ -225,28 +240,23 @@ src/wildfire_preproc/
   utils/                  # geometry, raster I/O helpers
 ```
 
-## Known integration gap
+## Live integration notes
 
-The LFPS fetcher (`src/wildfire_preproc/sources/lfps.py`) is written against the LANDFIRE Product Service ArcGIS REST job workflow (POST submitJob → poll status → GET output zip). The unit tests use the `responses` library to mock that workflow.
+The LFPS fetcher (`src/wildfire_preproc/sources/lfps.py`) uses the LANDFIRE Product Service REST workflow:
 
-When attempted live against `https://lfps.usgs.gov/api/job/submitJob`, the submit endpoint returns 404. The current LFPS site at `lfps.usgs.gov` is a Next.js single-page application; only its `/api/products` JSON endpoint is publicly exposed (which we used to verify the layer codes). The actual job-submit endpoint surface needs further discovery before live runs will succeed.
+1. Submit a job at `https://lfps.usgs.gov/api/job/submit`
+2. Poll `https://lfps.usgs.gov/api/job/status?JobId=<job id>`
+3. Download the output zip and extract the GeoTIFF
 
-What will likely fix this:
-
-- Inspecting the LFPS web app's network calls to find the real submit endpoint
-- Updating `LFPS_BASE`/`SUBMIT_URL`/`STATUS_URL` constants in `lfps.py`
-- Possibly updating `_submit` payload field names (currently `Layer_List`, `Area_Of_Interest`, `Output_Projection` — these are the legacy GP service names)
-- Possibly updating `_await_complete` status field handling (currently expects `Status` and `OutputFile` fields)
-
-Layer codes themselves are verified live (`LF2022_FBFM40`, `LF2022_CC`, `LF2022_CH`, `LF2022_CBH`, `LF2022_CBD`).
-
-The architecture isolates this risk: `LfpsSource.fetch` is the only place that talks to LFPS, and the rest of the pipeline doesn't know which backend produced the raster — fixing this in one file unblocks the full live run.
+The submit endpoint was verified live on 2026-05-09: a request without required
+parameters returns `400 Bad Request`, confirming the endpoint exists. The code
+still requires a real `LANDFIRE_EMAIL` for live job submission.
 
 ## Development
 
 ```bash
 uv run pytest -m "not live"                    # 62 tests, ~5s
-uv run pytest -m live                          # currently fails on LFPS URL — see above
+uv run pytest -m live                          # requires live LFPS/3DEP access and LANDFIRE_EMAIL
 uv run ruff check src tests
 uv run ruff format src tests
 uv run mypy src
@@ -257,6 +267,9 @@ Useful ad-hoc:
 ```bash
 # Probe LFPS products endpoint (this works)
 curl https://lfps.usgs.gov/api/products | jq '.products[] | select(.version=="LF2022")'
+
+# Probe LFPS submit endpoint shape; 400 means the endpoint exists but needs parameters
+curl -I https://lfps.usgs.gov/api/job/submit
 
 # Probe 3DEP (this also works)
 curl 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer?f=json'

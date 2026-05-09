@@ -10,46 +10,68 @@
     <main class="app-shell">
       <aside class="sidebar" aria-label="Simulation controls">
         <div class="brand-row">
+          <div class="brand-mark" aria-hidden="true">A</div>
           <div>
             <h1>AgriShield</h1>
-            <p>Wildfire simulation and firebreak planning</p>
+            <p>Simple wildfire planning for farms and fields</p>
           </div>
           <span class="status-pill" id="jobStatus">Draft</span>
         </div>
 
-        <section class="panel">
+        <section class="progress-panel" aria-label="Planning steps">
+          <div class="step active">
+            <span>1</span>
+            <strong>Mark farm</strong>
+          </div>
+          <div class="step">
+            <span>2</span>
+            <strong>Check fire risk</strong>
+          </div>
+          <div class="step">
+            <span>3</span>
+            <strong>Plan breaks</strong>
+          </div>
+        </section>
+
+        <section class="panel priority-panel">
           <div class="panel-head">
-            <h2>Protected Land</h2>
+            <div>
+              <h2>Your Farm Boundary</h2>
+              <p>Tap the map corners around the land you want to protect.</p>
+            </div>
             <button class="icon-button" id="clearPolygon" title="Clear polygon" aria-label="Clear polygon">
               ×
             </button>
           </div>
           <div class="toolbar compact">
-            <button class="tool active" id="drawMode">Draw</button>
-            <button class="tool" id="samplePolygon">Sample</button>
-            <button class="tool" id="fitMap">Fit</button>
+            <button class="tool active" id="drawMode">Draw area</button>
+            <button class="tool" id="undoPoint">Undo point</button>
+            <button class="tool" id="samplePolygon">Use sample</button>
           </div>
           <dl class="metrics">
             <div>
-              <dt>Vertices</dt>
+              <dt>Map points</dt>
               <dd id="vertexCount">0</dd>
             </div>
             <div>
-              <dt>Area</dt>
+              <dt>Farm size</dt>
               <dd id="areaEstimate">0 ha</dd>
             </div>
           </dl>
         </section>
 
         <section class="panel">
-          <h2>Simulation Settings</h2>
+          <div class="panel-title">
+            <h2>Fire Setup</h2>
+            <p>Use the defaults unless you know local conditions.</p>
+          </div>
           <label>
-            <span>Simulation radius</span>
+            <span>How far to check around the farm</span>
             <input id="simulationRadius" type="range" min="1500" max="10000" step="250" value="5000" />
             <strong id="simulationRadiusValue">5000 m</strong>
           </label>
           <label>
-            <span>Ignition distance</span>
+            <span>Where test fires start</span>
             <input id="ignitionDistance" type="range" min="1000" max="9500" step="250" value="4500" />
             <strong id="ignitionDistanceValue">4500 m</strong>
           </label>
@@ -59,31 +81,35 @@
             <strong id="windSpeedValue">8 m/s</strong>
           </label>
           <label>
-            <span>Optimization goal</span>
+            <span>What matters most</span>
             <select id="optimizationGoal">
-              <option value="minimize_firebreak_length">Minimize firebreak length</option>
-              <option value="minimize_cost">Minimize estimated cost</option>
-              <option value="maximize_risk_reduction">Maximize risk reduction</option>
+              <option value="minimize_firebreak_length">Shortest useful firebreak</option>
+              <option value="minimize_cost">Lowest estimated cost</option>
+              <option value="maximize_risk_reduction">Most protection</option>
             </select>
           </label>
           <label>
-            <span>Success condition</span>
+            <span>Good result means</span>
             <select id="successCondition">
-              <option value="no_burn_inside_polygon">No burn inside polygon</option>
-              <option value="reduce_burned_area_90pct">Reduce burned area 90%</option>
-              <option value="no_arrival_under_2h">No arrival under 2 hours</option>
+              <option value="no_burn_inside_polygon">Fire does not reach the farm</option>
+              <option value="reduce_burned_area_90pct">Burned area drops by 90%</option>
+              <option value="no_arrival_under_2h">Fire stays away for 2 hours</option>
             </select>
           </label>
         </section>
 
         <section class="panel">
-          <h2>Run Controls</h2>
+          <div class="panel-title">
+            <h2>Next Actions</h2>
+            <p>Preview uses local estimates. Import real output when the backend run finishes.</p>
+          </div>
           <div class="action-grid">
-            <button class="primary" id="runSimulation">Run Simulation</button>
-            <button id="loadResults">Import Results</button>
+            <button class="primary" id="runSimulation">Check risk</button>
+            <button id="loadResults">Import real results</button>
             <input id="resultsFile" type="file" accept=".json,application/json" hidden />
-            <button id="exportJob">Export Job JSON</button>
-            <button id="copyPayload">Copy Payload</button>
+            <button id="saveBackendJob">Save backend job</button>
+            <button id="exportJob">Download job</button>
+            <button id="copyPayload">Copy job</button>
           </div>
         </section>
       </aside>
@@ -91,22 +117,27 @@
       <section class="map-workspace">
         <div class="topbar">
           <nav class="tabs" aria-label="Views">
-            <button class="tab active" data-view="setup">Setup</button>
-            <button class="tab" data-view="baseline">Baseline</button>
+            <button class="tab active" data-view="setup">Farm map</button>
+            <button class="tab" data-view="baseline">Fire risk</button>
             <button class="tab" data-view="firebreak">Firebreaks</button>
-            <button class="tab" data-view="compare">Compare</button>
+            <button class="tab" data-view="compare">Options</button>
             <button class="tab" data-view="report">Report</button>
           </nav>
           <div class="map-legend">
-            <span><i class="protected"></i>Protected</span>
-            <span><i class="ignition"></i>Ignitions</span>
-            <span><i class="fire"></i>Spread</span>
+            <span><i class="protected"></i>Farm</span>
+            <span><i class="ignition"></i>Test fires</span>
+            <span><i class="fire"></i>Risk path</span>
             <span><i class="break"></i>Firebreak</span>
           </div>
         </div>
 
         <div class="map-stage">
           <canvas id="mapCanvas" width="1400" height="900" aria-label="Interactive planning map"></canvas>
+          <div class="quick-card" aria-live="polite">
+            <span>Current task</span>
+            <strong id="quickTask">Mark your farm boundary</strong>
+            <p id="quickDetail">Tap each corner of the farm. Use at least 3 points.</p>
+          </div>
           <div class="map-hud">
             <span id="cursorReadout">Lon -, Lat -</span>
             <span id="mapHint">Click to add polygon vertices</span>
@@ -116,24 +147,33 @@
 
       <aside class="results-panel" aria-label="Results and handoff">
         <section class="panel view-panel" data-panel="setup">
-          <h2>Backend Handoff</h2>
+          <div class="panel-title">
+            <h2>Job Summary</h2>
+            <p>This is the exact JSON the backend needs.</p>
+          </div>
           <pre id="payloadPreview"></pre>
         </section>
 
         <section class="panel view-panel hidden" data-panel="baseline">
-          <h2>Baseline Risk</h2>
+          <div class="panel-title">
+            <h2>Fire Risk Without New Breaks</h2>
+            <p>Shows how many test fires may reach the marked land.</p>
+          </div>
           <dl class="score-list">
-            <div><dt>Failed scenarios</dt><dd id="baselineFailed">-</dd></div>
-            <div><dt>Burned inside patch</dt><dd id="baselineBurned">-</dd></div>
-            <div><dt>Max flame length</dt><dd id="baselineFlame">-</dd></div>
+            <div><dt>Risky test fires</dt><dd id="baselineFailed">-</dd></div>
+            <div><dt>Farm area at risk</dt><dd id="baselineBurned">-</dd></div>
+            <div><dt>Flame height nearby</dt><dd id="baselineFlame">-</dd></div>
           </dl>
           <div class="scenario-list" id="scenarioList"></div>
         </section>
 
         <section class="panel view-panel hidden" data-panel="firebreak">
-          <h2>Recommended Layout</h2>
+          <div class="panel-title">
+            <h2>Recommended Firebreak Plan</h2>
+            <p>Lines on the map show where clearing is most useful.</p>
+          </div>
           <dl class="score-list">
-            <div><dt>Layout</dt><dd id="recommendedLayout">-</dd></div>
+            <div><dt>Plan</dt><dd id="recommendedLayout">-</dd></div>
             <div><dt>Segments</dt><dd id="segmentCount">-</dd></div>
             <div><dt>Length</dt><dd id="layoutLength">-</dd></div>
             <div><dt>Cost</dt><dd id="layoutCost">-</dd></div>
@@ -142,16 +182,28 @@
         </section>
 
         <section class="panel view-panel hidden" data-panel="compare">
-          <h2>Layout Comparison</h2>
+          <div class="panel-title">
+            <h2>Compare Firebreak Options</h2>
+            <p>Lower score means a better fit for your selected goal.</p>
+          </div>
           <div class="compare-list" id="compareList"></div>
         </section>
 
         <section class="panel view-panel hidden" data-panel="report">
-          <h2>Report Summary</h2>
+          <div class="panel-title">
+            <h2>Plain-English Report</h2>
+            <p>Use this summary when discussing the plan with a crew or advisor.</p>
+          </div>
           <textarea id="reportText" readonly></textarea>
         </section>
       </aside>
     </main>
+
+    <div class="mobile-action-bar" aria-label="Mobile actions">
+      <button id="mobileSample">Sample</button>
+      <button id="mobileUndo">Undo</button>
+      <button class="primary" id="mobileRun">Check risk</button>
+    </div>
 
     <template id="scenarioTemplate">
       <article class="scenario-card">
