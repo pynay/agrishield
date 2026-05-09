@@ -294,6 +294,19 @@ function pointAtBearing(origin, bearingDeg, distanceM) {
   };
 }
 
+function defaultLocationPolygon(lon, lat, widthM = 250, heightM = 250) {
+  const mPerDegLat = 111_320;
+  const mPerDegLon = Math.cos((lat * Math.PI) / 180) * mPerDegLat;
+  const halfWidth = widthM / 2;
+  const halfHeight = heightM / 2;
+  return [
+    { lon: lon - halfWidth / mPerDegLon, lat: lat - halfHeight / mPerDegLat },
+    { lon: lon + halfWidth / mPerDegLon, lat: lat - halfHeight / mPerDegLat },
+    { lon: lon + halfWidth / mPerDegLon, lat: lat + halfHeight / mPerDegLat },
+    { lon: lon - halfWidth / mPerDegLon, lat: lat + halfHeight / mPerDegLat },
+  ];
+}
+
 function setMapCenter(lon, lat) {
   center.lon = lon;
   center.lat = lat;
@@ -1606,6 +1619,7 @@ async function loadLiveConditions(lat, lon, label, elevationHint = null) {
   setLoadingFeed(`Loading conditions for ${label}`);
   clearLocationWorkspace();
   setMapCenter(lon, lat);
+  state.polygon = defaultLocationPolygon(lon, lat);
   state.locationName = label;
   state.locationPreprocessStatus = "starting";
   startLocationPreprocess(lat, lon, label);

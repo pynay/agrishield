@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import geopandas as gpd
+import rasterio.crs
 from pyproj import CRS, Transformer
-from rasterio.crs import CRS as RasterioCRS
 from rasterio.transform import Affine
 from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 
@@ -184,7 +184,7 @@ def _refresh_polygon_dependent_inputs(
         raise FileNotFoundError(f"missing preprocessed metadata: {metadata_path}")
     metadata = json.loads(metadata_path.read_text())
     grid = GridSpec(
-        crs=RasterioCRS.from_string(metadata["grid"]["crs"]),
+        crs=rasterio.crs.CRS.from_string(metadata["grid"]["crs"]),
         transform=Affine(*metadata["grid"]["transform"]),
         width=int(metadata["grid"]["width"]),
         height=int(metadata["grid"]["height"]),
@@ -265,24 +265,33 @@ def _load_geojson_geometry(path: Path) -> dict[str, Any]:
 
 
 def _write_summary(path: Path, result: ElmfireEnsembleResult) -> None:
+    runs = []
+    for run in result.runs:
+        scenario_summary_path = run.spec.output_dir / "summary.json"
+        scenario_summary = (
+            json.loads(scenario_summary_path.read_text())
+            if scenario_summary_path.exists()
+            else {}
+        )
+        run_payload = {
+            "run_id": run.spec.run_id,
+            "ok": run.ok,
+            "returncode": run.returncode,
+            "wind_to_direction_deg": run.spec.wind_to_direction_deg,
+            "wind_from_direction_deg": run.spec.wind_from_direction_deg,
+            "output_dir": str(run.spec.output_dir),
+            "output_files": [str(path) for path in run.output_files],
+        }
+        run_payload.update(scenario_summary)
+        runs.append(run_payload)
+
     payload = {
         "job_dir": str(result.job_dir),
         "protected_center": {
             "x": result.protected_center.x,
             "y": result.protected_center.y,
         },
-        "runs": [
-            {
-                "run_id": run.spec.run_id,
-                "ok": run.ok,
-                "returncode": run.returncode,
-                "wind_to_direction_deg": run.spec.wind_to_direction_deg,
-                "wind_from_direction_deg": run.spec.wind_from_direction_deg,
-                "output_dir": str(run.spec.output_dir),
-                "output_files": [str(path) for path in run.output_files],
-            }
-            for run in result.runs
-        ],
+        "runs": runs,
     }
     path.write_text(json.dumps(payload, indent=2))
 

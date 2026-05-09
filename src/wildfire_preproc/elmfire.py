@@ -9,11 +9,12 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Protocol
+from typing import Protocol, cast
 
 import geopandas as gpd
 import numpy as np
 import rasterio
+from rasterio.warp import Resampling, reproject
 from shapely.geometry import Point, shape
 
 from wildfire_preproc.config import JobConfig
@@ -260,6 +261,7 @@ def run_no_firebreak_elmfire_ensemble(
             dump_interval_s=dump_interval_s,
         )
         result = runner.run(spec)
+        _write_scenario_summary(result, raster_paths["protected_mask"])
         results.append(result)
         if fail_fast and not result.ok:
             raise RuntimeError(
@@ -503,6 +505,137 @@ def _write_run_manifest(spec: ElmfireRunSpec, crs: str) -> None:
         "output_dir": str(spec.output_dir),
     }
     (spec.output_dir / "run_manifest.json").write_text(json.dumps(payload, indent=2))
+
+
+def _write_scenario_summary(result: ElmfireRunResult, protected_mask_path: Path) -> None:
+    """Write UI/optimizer metrics derived from ELMFIRE rasters for one scenario."""
+    arrival_path = _find_output_raster(
+        result.spec.output_dir,
+        ("time_of_arrival", "toa", "arrival"),
+    )
+    intensity_path = _find_output_raster(
+        result.spec.output_dir,
+        ("flame_length", "flamelength", "flin", "fireline_intensity"),
+    )
+
+    patch_burned = False
+    burned_area_m2 = 0.0
+    first_arrival_minutes: float | None = None
+    max_flame_near_patch = 0.0
+
+    if result.ok and arrival_path is not None:
+        arrival, arrival_valid, cell_area_m2 = _read_metric_raster(arrival_path)
+        protected_mask = _read_mask_aligned(protected_mask_path, arrival_path)
+        burned_mask = protected_mask & arrival_valid
+        patch_burned = bool(burned_mask.any())
+        burned_area_m2 = float(burned_mask.sum() * cell_area_m2)
+        if patch_burned:
+            first_arrival_minutes = float(np.nanmin(arrival[burned_mask]) / 60.0)
+
+        if intensity_path is not None:
+            intensity, intensity_valid, _ = _read_metric_raster(intensity_path)
+            near_patch = _dilate_bool(protected_mask, radius=2) & intensity_valid
+            if near_patch.any():
+                max_flame_near_patch = float(np.nanmax(intensity[near_patch]))
+
+    payload = {
+        "scenario_id": _scenario_id_from_run_id(result.spec.run_id),
+        "run_id": result.spec.run_id,
+        "ok": result.ok,
+        "returncode": result.returncode,
+        "ignition_direction": _direction_name(result.spec.ignition_bearing_deg),
+        "ignition_bearing_deg": result.spec.ignition_bearing_deg,
+        "wind_to_direction_deg": result.spec.wind_to_direction_deg,
+        "wind_from_direction_deg": result.spec.wind_from_direction_deg,
+        "patch_burned": patch_burned,
+        "burned_area_inside_patch_m2": round(burned_area_m2, 3),
+        "first_arrival_to_patch_minutes": (
+            round(first_arrival_minutes, 3) if first_arrival_minutes is not None else None
+        ),
+        "max_flame_length_near_patch_m": round(max_flame_near_patch, 3),
+        "outputs": {
+            "time_of_arrival": str(arrival_path) if arrival_path is not None else None,
+            "flame_or_intensity": str(intensity_path) if intensity_path is not None else None,
+        },
+    }
+    (result.spec.output_dir / "summary.json").write_text(json.dumps(payload, indent=2))
+
+
+def _find_output_raster(root: Path, tokens: Sequence[str]) -> Path | None:
+    candidates = [
+        path
+        for path in Path(root).rglob("*.tif")
+        if any(token in path.stem.lower() for token in tokens)
+    ]
+    if not candidates:
+        return None
+    return sorted(candidates, key=lambda item: (len(item.parts), str(item)))[-1]
+
+
+def _read_metric_raster(path: Path) -> tuple[np.ndarray, np.ndarray, float]:
+    with rasterio.open(path) as src:
+        data = cast(np.ndarray, src.read(1).astype("float32"))
+        nodata = src.nodata
+        cell_area_m2 = abs(src.transform.a * src.transform.e)
+    valid = np.isfinite(data)
+    if nodata is not None:
+        valid &= data != nodata
+    valid &= data > 0
+    return data, valid, float(cell_area_m2)
+
+
+def _read_mask_aligned(mask_path: Path, reference_path: Path) -> np.ndarray:
+    with rasterio.open(reference_path) as ref, rasterio.open(mask_path) as mask_src:
+        if (
+            mask_src.crs == ref.crs
+            and mask_src.transform == ref.transform
+            and mask_src.width == ref.width
+            and mask_src.height == ref.height
+        ):
+            return cast(np.ndarray, mask_src.read(1) == 1)
+        destination = np.zeros((ref.height, ref.width), dtype="uint8")
+        reproject(
+            source=mask_src.read(1),
+            destination=destination,
+            src_transform=mask_src.transform,
+            src_crs=mask_src.crs,
+            dst_transform=ref.transform,
+            dst_crs=ref.crs,
+            resampling=Resampling.nearest,
+        )
+    return destination == 1
+
+
+def _dilate_bool(mask: np.ndarray, radius: int) -> np.ndarray:
+    padded = np.pad(mask, radius, mode="constant", constant_values=False)
+    out = np.zeros_like(mask, dtype=bool)
+    window = radius * 2 + 1
+    for row in range(window):
+        for col in range(window):
+            out |= padded[row : row + mask.shape[0], col : col + mask.shape[1]]
+    return out
+
+
+def _scenario_id_from_run_id(run_id: str) -> int:
+    try:
+        bearing = float(run_id.rsplit("_", 1)[-1])
+    except ValueError:
+        return 1
+    return round((bearing % 360.0) / 45.0) + 1
+
+
+def _direction_name(bearing: float) -> str:
+    names = (
+        "north",
+        "northeast",
+        "east",
+        "southeast",
+        "south",
+        "southwest",
+        "west",
+        "northwest",
+    )
+    return names[round((bearing % 360.0) / 45.0) % len(names)]
 
 
 def _wsl_path(path: Path) -> str:
