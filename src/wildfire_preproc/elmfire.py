@@ -405,7 +405,9 @@ def _write_elmfire_rasters(
     _write_constant_like(ref_path, inputs_dir / "adj.tif", 1.0)
     _write_constant_like(ref_path, inputs_dir / "phi.tif", 1.0)
 
-    _copy_as_int16(source_rasters["slp"], inputs_dir / "slp.tif")
+    # ELMFIRE expects slope in PERCENT (rise/run * 100), not degrees.
+    # Our Horn 3x3 slope is in degrees, so convert via tan(deg) * 100.
+    _copy_slope_deg_to_percent_int16(source_rasters["slp"], inputs_dir / "slp.tif")
     _copy_as_int16(source_rasters["asp"], inputs_dir / "asp.tif", flat_value=0)
     _copy_as_int16(source_rasters["dem"], inputs_dir / "dem.tif")
     _copy_as_int16(source_rasters["fbfm40"], inputs_dir / "fbfm40.tif", nodata_value=99)
@@ -447,6 +449,43 @@ def _copy_as_int16(
     profile.update(dtype="int16", nodata=nodata_value, count=1, compress="LZW")
     with rasterio.open(out_path, "w", **profile) as dst:
         dst.write(arr, 1)
+
+
+def _copy_slope_deg_to_percent_int16(
+    src_path: Path,
+    out_path: Path,
+    nodata_value: int = -9999,
+) -> None:
+    """Convert a degree-valued slope raster to percent and write as int16.
+
+    ELMFIRE's `SLP_FILENAME` expects slope as `tan(angle) * 100` (a percent
+    grade), but our Horn 3x3 derivation produces slope in degrees (0-90).
+    Writing degrees as-is causes ELMFIRE to under-weight terrain, biasing
+    fire spread toward wind-dominated outcomes — which can produce
+    asymmetric "always burns this bearing, never burns that one" patterns
+    that look like a bug elsewhere.
+
+    Vertical cliffs (slope ≈ 90°) blow up `tan`; we clip to the int16 range
+    so the output stays well-defined even on synthetic edge inputs.
+    """
+    with rasterio.open(src_path) as src:
+        arr = src.read(1).astype("float32")
+        src_nodata = src.nodata
+        profile = src.profile.copy()
+
+    valid = np.ones(arr.shape, dtype=bool)
+    if src_nodata is not None:
+        valid = arr != src_nodata
+
+    # Clamp slope to <90 degrees before tan() to avoid +inf at vertical cliffs.
+    safe_deg = np.clip(np.where(valid, arr, 0.0), 0.0, 89.99)
+    percent = np.tan(np.deg2rad(safe_deg)) * 100.0
+    out = np.where(valid, np.rint(percent), nodata_value)
+    out = np.clip(out, np.iinfo(np.int16).min, np.iinfo(np.int16).max).astype("int16")
+
+    profile.update(dtype="int16", nodata=nodata_value, count=1, compress="LZW")
+    with rasterio.open(out_path, "w", **profile) as dst:
+        dst.write(out, 1)
 
 
 def _write_elmfire_data(

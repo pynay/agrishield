@@ -190,3 +190,42 @@ def test_resolve_elmfire_runner_can_skip_check(tmp_path: Path) -> None:
         "native", tmp_path / "missing", check_executable=False
     )
     assert runner is not None
+
+
+def test_copy_slope_deg_to_percent_int16_converts_units(tmp_path: Path) -> None:
+    """Slope written for ELMFIRE must be percent (tan(deg)*100), not degrees.
+
+    A 30° slope should land on the disk as ~58 (≈tan(30°)*100), not as 30.
+    A 0° slope stays 0. A 45° slope is exactly 100 (tan(45°)=1).
+    """
+    from wildfire_preproc.elmfire import _copy_slope_deg_to_percent_int16
+
+    transform = from_origin(0.0, 90.0, 30.0, 30.0)
+    deg_arr = np.array(
+        [
+            [0.0, 30.0, 45.0],
+            [60.0, 89.99, -9999.0],
+            [10.0, 20.0, 75.0],
+        ],
+        dtype="float32",
+    )
+    src = tmp_path / "slp_deg.tif"
+    _write_test_raster(src, deg_arr, transform, "float32", nodata=-9999.0)
+
+    out = tmp_path / "slp_percent.tif"
+    _copy_slope_deg_to_percent_int16(src, out)
+
+    with rasterio.open(out) as ds:
+        result = ds.read(1)
+        assert ds.dtypes[0] == "int16"
+        assert ds.nodata == -9999
+
+    # Verify a few key values via tan(deg)*100, rounded to int16.
+    assert result[0, 0] == 0          # 0° -> 0%
+    assert result[0, 1] == 58         # 30° -> ~57.7 -> rint = 58
+    assert result[0, 2] == 100        # 45° -> 100%
+    assert result[1, 0] == 173        # 60° -> ~173.2 -> rint = 173
+    assert result[1, 2] == -9999      # nodata preserved
+    # The previous (buggy) behavior would have written the degrees verbatim.
+    assert result[0, 1] != 30
+    assert result[1, 0] != 60
