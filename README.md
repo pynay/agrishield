@@ -8,15 +8,19 @@ Given a protected-land polygon and a simulation config, the pipeline produces an
 
 The pipeline (Stages 1-7) is fully implemented and tested against synthetic data:
 
-- 64 unit + integration tests pass
-- mypy strict + ruff strict are clean across `src/` and `tests/`
+- 91 unit + integration tests pass
+- mypy strict + ruff strict are clean across `src/`, `tests/`, `main.py`, and `web/server.py`
 - The orchestrator (`run_pipeline`) wires every stage in order and produces the full output manifest
 - All rasters share an identical canonical grid, enforced by `reproject_match` as the single chokepoint
+- Firebreak optimization (`wildfire-preproc optimize-firebreaks`) ranks candidate layouts and, with `--rerun-elmfire`, re-runs the 8-bearing ensemble against the recommended layout's modified fbfm40 to populate `optimized_result` in `firebreak_optimization.json`
+- ELMFIRE runners validate the binary path at construction (clear `ElmfireExecutableMissingError` instead of a confusing subprocess failure) and `--runner auto|wsl|native` is consistent across `main.py` and the CLI
+- Mask validation now fails fast if `protected_mask` or `candidate_zone` are entirely zero (a sign that the source polygon never intersected the canonical grid)
+- LFPS cache keys include `landfire_version` so LF2022 and LF2023 fetches cannot collide
 
 **Live-API status:**
 
 - 3DEP DEM fetcher: endpoint verified live; should work end-to-end
-- LFPS fetcher: job endpoint surface verified as `/api/job/submit` and `/api/job/status`; live runs still require a real `LANDFIRE_EMAIL`
+- LFPS fetcher: job endpoint surface verified as `/api/job/submit` and `/api/job/status`; live runs still require a real `LANDFIRE_EMAIL` (set in `.env` — `web/server.py` and `main.py` share the same loader)
 
 ## Quick start
 
@@ -24,12 +28,12 @@ The pipeline (Stages 1-7) is fully implemented and tested against synthetic data
 # Install
 uv sync --all-groups
 
-# Run the offline test suite (62 tests, all passing)
+# Run the offline test suite (90 tests, all passing; live test deselected by default)
 uv run pytest -m "not live"
 
-# Type-check and lint
+# Type-check and lint (everything we cover by default)
 uv run mypy src
-uv run ruff check src tests
+uv run ruff check src tests main.py web/server.py
 ```
 
 ## UI workspace
@@ -153,8 +157,9 @@ Or use your own farm boundary GeoJSON:
 
 Prerequisites:
 
-- ELMFIRE must be built at `elmfire/build/linux/bin/elmfire_2025.0212`. The setup in this workspace uses WSL Ubuntu and the official `elmfire/build/linux/make_gnu.sh` build.
-- Live preprocessing still depends on the LFPS fetch endpoint. See "Known integration gap" if LFPS layer fetching fails before the ELMFIRE stage.
+- ELMFIRE must be built at `elmfire/build/linux/bin/elmfire_2025.0212`. The setup in this workspace uses WSL Ubuntu and the official `elmfire/build/linux/make_gnu.sh` build. The `elmfire/` directory is intentionally a peer-install location, not a git submodule — see [`elmfire/README.md`](elmfire/README.md) for the build procedure. The runners (`wildfire_preproc.elmfire.SubprocessElmfireRunner` / `WslElmfireRunner` / `resolve_elmfire_runner`) all validate the executable exists at construction and raise `ElmfireExecutableMissingError` with a clear message rather than failing partway through a subprocess.
+- `--runner auto|wsl|native` is consistent across `python main.py` and `wildfire-preproc elmfire`. `auto` picks WSL on Windows and the native subprocess on macOS/Linux.
+- Live preprocessing still depends on the LFPS fetch endpoint. See "Live integration notes" below if LFPS layer fetching fails before the ELMFIRE stage.
 
 Before live LFPS preprocessing, set your LANDFIRE email in `.env`:
 
@@ -227,9 +232,9 @@ By default the input polygon is interpreted as `EPSG:4326` (lon/lat). Override w
 
 ```
 src/wildfire_preproc/
-  cli.py                  # `wildfire-preproc run|validate|sample`
+  cli.py                  # `wildfire-preproc run|validate|sample|elmfire|optimize-firebreaks`
   config.py               # LayerKey, LayerKind, JobConfig (pydantic v2)
-  pipeline.py             # 7-stage orchestrator
+  pipeline.py             # 7-stage preprocessing orchestrator
   domain/                 # Stage 1
   sources/                # Stage 2: base Protocol + LFPS + 3DEP + local + registry
   align/                  # Stage 3: GridSpec + reproject_match
@@ -237,7 +242,27 @@ src/wildfire_preproc/
   masks/                  # Stage 5: protected, candidate, non-burnable
   validation/             # Stage 6: per-raster checks + report formatter + FBFM40 codes
   export/                 # Stage 7: metadata.json
-  utils/                  # geometry, raster I/O helpers
+  elmfire.py              # ELMFIRE 8-bearing ensemble: SubprocessElmfireRunner,
+                          # WslElmfireRunner, resolve_elmfire_runner, validation
+  optimization/           # firebreak layout generation + ranking + optional
+                          # `--rerun-elmfire` populates `optimized_result`
+  utils/                  # geometry, raster I/O, .env loader
+```
+
+### CLI commands
+
+```
+wildfire-preproc run <job.json>                       # Stage 1-7 preprocessing
+wildfire-preproc validate <job_dir>                   # re-run Stage 6 against on-disk rasters
+wildfire-preproc sample                               # bundled Santa Monica AOI
+wildfire-preproc elmfire <job.json> <job_dir>         # 8-bearing ELMFIRE ensemble
+                  [--runner auto|wsl|native] [--executable PATH]
+wildfire-preproc optimize-firebreaks <job_dir>        # rank firebreak layouts
+                  [--baseline-dir DIR]                # uses ELMFIRE summaries to weight risk
+                  [--rerun-elmfire]                   # re-run ELMFIRE for the recommended
+                  [--executable PATH]                 # layout's modified fbfm40 and populate
+                  [--runner auto|wsl|native]          # optimized_result in the JSON output
+                  [--job-json PATH]                   # required for --rerun-elmfire
 ```
 
 ## Live integration notes
@@ -255,9 +280,9 @@ still requires a real `LANDFIRE_EMAIL` for live job submission.
 ## Development
 
 ```bash
-uv run pytest -m "not live"                    # 62 tests, ~5s
+uv run pytest -m "not live"                    # 91 tests, ~2s
 uv run pytest -m live                          # requires live LFPS/3DEP access and LANDFIRE_EMAIL
-uv run ruff check src tests
+uv run ruff check src tests main.py web/server.py
 uv run ruff format src tests
 uv run mypy src
 ```

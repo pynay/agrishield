@@ -21,9 +21,7 @@ from wildfire_preproc.config import JobConfig
 from wildfire_preproc.domain.simulation_domain import build_domain
 from wildfire_preproc.elmfire import (
     ElmfireEnsembleResult,
-    ElmfireRunner,
-    SubprocessElmfireRunner,
-    WslElmfireRunner,
+    resolve_elmfire_runner,
     run_no_firebreak_elmfire_ensemble,
 )
 from wildfire_preproc.masks.candidate import build_candidate_zone_mask
@@ -32,6 +30,7 @@ from wildfire_preproc.masks.protected import build_protected_mask
 from wildfire_preproc.pipeline import run_pipeline
 from wildfire_preproc.sources.base import RasterSource
 from wildfire_preproc.sources.registry import DefaultSourceRegistry
+from wildfire_preproc.utils.env import load_env_file as _shared_load_env_file
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_ELMFIRE = PROJECT_ROOT / "elmfire" / "build" / "linux" / "bin" / "elmfire_2025.0212"
@@ -47,15 +46,12 @@ SAN_DIEGO_EXAMPLE = {
 
 
 def load_env_file(path: Path = PROJECT_ROOT / ".env") -> None:
-    """Load simple KEY=VALUE pairs into the process environment."""
-    if not path.exists():
-        return
-    for raw_line in path.read_text().splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    """Backward-compat wrapper around `wildfire_preproc.utils.env.load_env_file`.
+
+    Kept so `from main import load_env_file` continues to work for callers that
+    relied on it before the helper moved to the shared utils module.
+    """
+    _shared_load_env_file(path)
 
 
 def rectangle_location(
@@ -144,22 +140,34 @@ def run_location_fire_simulations(
         )
     else:
         preprocessed_dir = Path(preprocessed_dir)
-        _refresh_polygon_dependent_inputs(
-            cfg=cfg,
-            preprocessed_dir=preprocessed_dir,
-            protected_polygon_crs=protected_polygon_crs,
-        )
+        try:
+            _refresh_polygon_dependent_inputs(
+                cfg=cfg,
+                preprocessed_dir=preprocessed_dir,
+                protected_polygon_crs=protected_polygon_crs,
+            )
+        except PreprocessedReuseError as exc:
+            # The cached grid does not cover the user's simulation domain.
+            # Fall through to a fresh full preprocessing pass instead of
+            # silently reusing stale rasters that don't span the AOI.
+            print(
+                f"[main] preprocessed-dir reuse rejected ({exc}); "
+                "running full preprocessing instead."
+            )
+            preprocessed_dir = out_dir / "preprocessed"
+            run_pipeline(
+                cfg=cfg,
+                out_dir=preprocessed_dir,
+                source=source,
+                protected_polygon_crs=protected_polygon_crs,
+                keep_intermediate=keep_intermediate,
+            )
 
-    runner: ElmfireRunner
-    if elmfire_runner == "auto":
-        elmfire_runner = "wsl" if os.name == "nt" else "native"
-    if elmfire_runner == "wsl":
-        runner = WslElmfireRunner(executable=elmfire_executable, distro=wsl_distro)
-    elif elmfire_runner == "native":
-        runner = SubprocessElmfireRunner([str(elmfire_executable)])
-    else:
-        raise ValueError(f"Unsupported ELMFIRE runner: {elmfire_runner}")
-
+    runner = resolve_elmfire_runner(
+        choice=elmfire_runner,  # type: ignore[arg-type]
+        executable=elmfire_executable,
+        wsl_distro=wsl_distro,
+    )
     result = run_no_firebreak_elmfire_ensemble(
         cfg=cfg,
         job_dir=preprocessed_dir,
@@ -172,25 +180,75 @@ def run_location_fire_simulations(
     return result
 
 
+class PreprocessedReuseError(RuntimeError):
+    """Raised when a preprocessed directory does not cover the user's simulation domain."""
+
+
+# Backward-compat alias for callers that imported the old name.
+PreprocessedReuseMismatch = PreprocessedReuseError
+
+
 def _refresh_polygon_dependent_inputs(
     cfg: JobConfig,
     preprocessed_dir: Path,
     protected_polygon_crs: str,
 ) -> None:
-    """Reuse fetched vegetation rasters while updating user-polygon domain inputs."""
+    """Reuse fetched vegetation rasters while updating user-polygon domain inputs.
+
+    Raises `PreprocessedReuseMismatch` if the cached grid does not cover the
+    user's simulation domain, the user's CRS, or the user's cell size — so
+    that callers can fall back to a fresh full pipeline instead of producing
+    silently-incorrect outputs.
+    """
     inputs = preprocessed_dir / "inputs"
     metadata_path = inputs / "metadata.json"
     if not metadata_path.exists():
         raise FileNotFoundError(f"missing preprocessed metadata: {metadata_path}")
     metadata = json.loads(metadata_path.read_text())
+    grid_crs = rasterio.crs.CRS.from_string(metadata["grid"]["crs"])
     grid = GridSpec(
-        crs=rasterio.crs.CRS.from_string(metadata["grid"]["crs"]),
+        crs=grid_crs,
         transform=Affine(*metadata["grid"]["transform"]),
         width=int(metadata["grid"]["width"]),
         height=int(metadata["grid"]["height"]),
         cell_size=float(metadata["config"]["cell_size_m"]),
     )
+
+    # Reuse safety: the cached grid must match the requested CRS + cell size,
+    # and must geographically cover the user's simulation domain (the buffer
+    # around the protected polygon).
+    if grid_crs != rasterio.crs.CRS.from_string(cfg.crs):
+        raise PreprocessedReuseError(
+            f"cached grid CRS {grid_crs.to_string()!r} does not match "
+            f"requested CRS {cfg.crs!r}"
+        )
+    if abs(grid.cell_size - cfg.cell_size_m) > 1e-9:
+        raise PreprocessedReuseError(
+            f"cached cell size {grid.cell_size} does not match "
+            f"requested {cfg.cell_size_m}"
+        )
+
     polygon = shape(cfg.protected_polygon)
+    polygon_in_target = (
+        gpd.GeoDataFrame(geometry=[polygon], crs=protected_polygon_crs)
+        .to_crs(cfg.crs)
+        .geometry.iloc[0]
+    )
+    sim_domain = polygon_in_target.buffer(cfg.simulation_radius_m)
+    sim_minx, sim_miny, sim_maxx, sim_maxy = sim_domain.bounds
+    grid_minx, grid_miny, grid_maxx, grid_maxy = grid.bounds
+    if (
+        sim_minx < grid_minx - 1e-6
+        or sim_miny < grid_miny - 1e-6
+        or sim_maxx > grid_maxx + 1e-6
+        or sim_maxy > grid_maxy + 1e-6
+    ):
+        raise PreprocessedReuseError(
+            f"simulation domain bounds {(sim_minx, sim_miny, sim_maxx, sim_maxy)} "
+            f"are not contained in cached grid bounds "
+            f"{(grid_minx, grid_miny, grid_maxx, grid_maxy)}"
+        )
+
     with tempfile.TemporaryDirectory(prefix="agrishield_domain_") as tmp:
         tmp_dir = Path(tmp)
         art = build_domain(

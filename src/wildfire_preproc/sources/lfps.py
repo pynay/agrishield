@@ -89,7 +89,9 @@ class LfpsSource:
                 "LFPS requires an email address. Set LANDFIRE_EMAIL or pass "
                 "email=... when constructing LfpsSource."
             )
-        cache_path = cache_key_path(self._cache_dir, layer, bbox, dst_crs)
+        cache_path = cache_key_path(
+            self._cache_dir, layer, bbox, dst_crs, version=self._landfire_version
+        )
         if cache_path.exists():
             return cache_path
 

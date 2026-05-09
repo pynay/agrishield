@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import geopandas as gpd
 import numpy as np
@@ -19,10 +20,13 @@ from shapely import ops
 from shapely.geometry import LineString, MultiPoint, Point, mapping, shape
 from shapely.geometry.base import BaseGeometry, BaseMultipartGeometry
 
-from wildfire_preproc.config import LayerKind
+from wildfire_preproc.config import JobConfig, LayerKind
 from wildfire_preproc.utils.geometry import point_at_bearing
 from wildfire_preproc.utils.raster import write_array
 from wildfire_preproc.validation.fbfm40_codes import NON_BURNABLE_CODES
+
+if TYPE_CHECKING:
+    from wildfire_preproc.elmfire import ElmfireEnsembleResult, ElmfireRunner
 
 DEFAULT_BEARINGS: tuple[int, ...] = (0, 45, 90, 135, 180, 225, 270, 315)
 DEFAULT_FIREBREAK_FUEL_CODE = 99
@@ -106,6 +110,28 @@ class FirebreakLayout:
 
 
 @dataclass(frozen=True)
+class OptimizedResult:
+    """Aggregated outcome from ELMFIRE simulations of the recommended layout."""
+
+    layout_id: str
+    scenarios_run: int
+    scenarios_failed: int
+    burned_area_inside_patch_m2: float
+    max_flame_length_near_patch_m: float
+    output_dir: Path
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "layout_id": self.layout_id,
+            "scenarios_run": self.scenarios_run,
+            "scenarios_failed": self.scenarios_failed,
+            "burned_area_inside_patch_m2": round(self.burned_area_inside_patch_m2, 3),
+            "max_flame_length_near_patch_m": round(self.max_flame_length_near_patch_m, 3),
+            "output_dir": str(self.output_dir),
+        }
+
+
+@dataclass(frozen=True)
 class OptimizationResult:
     """Ranked firebreak optimization result."""
 
@@ -113,6 +139,7 @@ class OptimizationResult:
     layouts: tuple[FirebreakLayout, ...]
     baseline_result: BaselineResult
     output_path: Path
+    optimized_result: OptimizedResult | None = None
 
     def to_ui_payload(self) -> dict[str, Any]:
         recommended = self.layouts[0]
@@ -132,8 +159,13 @@ class OptimizationResult:
                 "burned_area_inside_patch_m2": round(
                     self.baseline_result.burned_area_inside_patch_m2, 3
                 ),
+                "max_flame_length_near_patch_m": round(
+                    self.baseline_result.max_flame_length_near_patch_m, 3
+                ),
             },
-            "optimized_result": None,
+            "optimized_result": (
+                self.optimized_result.to_payload() if self.optimized_result is not None else None
+            ),
             "ranked_layouts": [
                 {
                     "layout_id": layout.layout_id,
@@ -159,12 +191,28 @@ def optimize_firebreaks(
     baseline_dir: Path | None = None,
     out_dir: Path | None = None,
     config: FirebreakOptimizationConfig | None = None,
+    *,
+    runner: ElmfireRunner | None = None,
+    job_config: JobConfig | None = None,
+    protected_polygon_crs: str = "EPSG:4326",
+    wind_speed_mps: float = 6.7,
+    simulation_tstop_s: float = 21_600.0,
 ) -> OptimizationResult:
     """Generate and score firebreak layouts for a preprocessed simulation job.
 
     `job_dir` may be either the preprocessing directory containing `inputs/`, or
     the `inputs/` directory itself. The function writes ranked layouts, each with
     a firebreak mask, modified `fbfm40.tif`, and `segments.geojson`.
+
+    If `runner` is provided, the recommended layout's modified fbfm40 is fed
+    back to ELMFIRE in a fresh 8-bearing ensemble and the aggregated outcome
+    is returned as `OptimizationResult.optimized_result`. The runner must
+    point at a real ELMFIRE binary (or a fake runner for tests). When `runner`
+    is None, `optimized_result` is `None` and only baseline scoring + layout
+    ranking are produced.
+
+    `job_config` is required when `runner` is set. If omitted, we try to load
+    `job.json` from `<job_dir>/../job.json` (the layout `main.py` writes).
     """
     cfg = config or FirebreakOptimizationConfig()
     inputs_dir = _resolve_inputs_dir(job_dir)
@@ -223,14 +271,128 @@ def optimize_firebreaks(
             crs=str(crs),
         )
 
+    optimized_result: OptimizedResult | None = None
+    if runner is not None:
+        resolved_cfg = job_config or _load_job_config_near(inputs_dir)
+        optimized_result = _run_elmfire_for_recommended_layout(
+            recommended=ranked[0],
+            inputs_dir=inputs_dir,
+            out_dir=out_dir,
+            cfg=resolved_cfg,
+            runner=runner,
+            protected_polygon_crs=protected_polygon_crs,
+            wind_speed_mps=wind_speed_mps,
+            simulation_tstop_s=simulation_tstop_s,
+        )
+
     result = OptimizationResult(
         recommended_layout_id=ranked[0].layout_id,
         layouts=ranked,
         baseline_result=baseline_result,
         output_path=out_dir / "firebreak_optimization.json",
+        optimized_result=optimized_result,
     )
     result.output_path.write_text(json.dumps(result.to_ui_payload(), indent=2))
     return result
+
+
+def _load_job_config_near(inputs_dir: Path) -> JobConfig:
+    """Locate and load the `job.json` produced by `main.py` next to the preprocessed dir."""
+    candidates = [
+        inputs_dir.parent.parent / "job.json",  # main.py layout: <out>/job.json
+        inputs_dir.parent / "job.json",         # alt: alongside `preprocessed/`
+        inputs_dir / "job.json",                # alt: inside inputs/
+    ]
+    for path in candidates:
+        if path.exists():
+            return JobConfig.from_json_file(path)
+    raise FileNotFoundError(
+        "Could not locate job.json for the optimized rerun. Pass job_config=... "
+        "explicitly, or ensure job.json is next to the preprocessed directory."
+    )
+
+
+def _run_elmfire_for_recommended_layout(
+    *,
+    recommended: FirebreakLayout,
+    inputs_dir: Path,
+    out_dir: Path,
+    cfg: JobConfig,
+    runner: ElmfireRunner,
+    protected_polygon_crs: str,
+    wind_speed_mps: float,
+    simulation_tstop_s: float,
+) -> OptimizedResult:
+    """Re-run ELMFIRE with the recommended layout's modified fbfm40 swapped in.
+
+    This stages a fresh inputs/ directory under
+    `<out_dir>/elmfire_with_recommended/inputs/` containing every preprocessed
+    raster except `fbfm40.tif`, which is replaced with the layout's modified
+    raster (firebreak cells coded as `firebreak_fuel_code`). Then it invokes
+    `run_no_firebreak_elmfire_ensemble` against that staged directory and
+    aggregates the per-scenario `summary.json` files into an OptimizedResult.
+    """
+    # Imported here to avoid a circular import at module load.
+    from wildfire_preproc.elmfire import run_no_firebreak_elmfire_ensemble
+
+    rerun_dir = out_dir / "elmfire_with_recommended"
+    rerun_inputs = rerun_dir / "inputs"
+    rerun_inputs.mkdir(parents=True, exist_ok=True)
+    # Stage all preprocessed rasters + ignition points into the rerun dir.
+    for src in inputs_dir.iterdir():
+        if src.is_file():
+            shutil.copy2(src, rerun_inputs / src.name)
+    # Swap in the layout's modified fbfm40 (firebreak cells encoded as code 99).
+    modified_fbfm = out_dir / "layouts" / recommended.layout_id / "fbfm40.tif"
+    if not modified_fbfm.exists():
+        raise FileNotFoundError(f"layout artifact missing: {modified_fbfm}")
+    shutil.copy2(modified_fbfm, rerun_inputs / "fbfm40.tif")
+    firebreak_mask_path = out_dir / "layouts" / recommended.layout_id / "firebreak_mask.tif"
+
+    ensemble = run_no_firebreak_elmfire_ensemble(
+        cfg=cfg,
+        job_dir=rerun_dir,
+        runner=runner,
+        protected_polygon_crs=protected_polygon_crs,
+        out_dir=rerun_dir / "scenarios",
+        wind_speed_mps=wind_speed_mps,
+        simulation_tstop_s=simulation_tstop_s,
+        fail_fast=False,
+        firebreak_mask_path=firebreak_mask_path if firebreak_mask_path.exists() else None,
+    )
+    return _aggregate_optimized_result(ensemble, recommended.layout_id, rerun_dir)
+
+
+def _aggregate_optimized_result(
+    ensemble: ElmfireEnsembleResult,
+    layout_id: str,
+    rerun_dir: Path,
+) -> OptimizedResult:
+    """Aggregate per-scenario summaries from the optimized ensemble run."""
+    burned_area_total = 0.0
+    max_flame_overall = 0.0
+    scenarios_failed = 0
+    for run in ensemble.runs:
+        summary_path = run.spec.output_dir / "summary.json"
+        if not summary_path.exists() or not run.ok:
+            scenarios_failed += 1
+            continue
+        payload = json.loads(summary_path.read_text())
+        if payload.get("patch_burned"):
+            scenarios_failed += 1
+        burned_area_total += float(payload.get("burned_area_inside_patch_m2", 0.0) or 0.0)
+        max_flame_overall = max(
+            max_flame_overall,
+            float(payload.get("max_flame_length_near_patch_m", 0.0) or 0.0),
+        )
+    return OptimizedResult(
+        layout_id=layout_id,
+        scenarios_run=len(ensemble.runs),
+        scenarios_failed=scenarios_failed,
+        burned_area_inside_patch_m2=burned_area_total,
+        max_flame_length_near_patch_m=max_flame_overall,
+        output_dir=rerun_dir,
+    )
 
 
 def load_scenario_summaries(baseline_dir: Path) -> list[ScenarioSummary]:

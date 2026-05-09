@@ -10,3 +10,7 @@ htmlcov/
 jobs/
 _intermediate/
 .DS_Store
+
+# ELMFIRE peer install — see elmfire/README.md
+elmfire/*
+!elmfire/README.md

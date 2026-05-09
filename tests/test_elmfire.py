@@ -115,3 +115,78 @@ def _write_test_raster(
         nodata=nodata,
     ) as dst:
         dst.write(data, 1)
+
+
+def test_subprocess_runner_validates_executable_exists(tmp_path: Path) -> None:
+    """SubprocessElmfireRunner must fail at construction with a clear message
+    when the path-style executable does not exist."""
+    from wildfire_preproc.elmfire import (
+        ElmfireExecutableMissing,
+        SubprocessElmfireRunner,
+    )
+
+    missing = tmp_path / "no-such-elmfire"
+    with pytest.raises(ElmfireExecutableMissing, match="not found"):
+        SubprocessElmfireRunner([str(missing)])
+
+
+def test_subprocess_runner_skips_check_for_bare_command_names(tmp_path: Path) -> None:
+    """A bare command name (no path separator) is assumed to be on PATH and
+    should not trigger an existence check at construction."""
+    from wildfire_preproc.elmfire import SubprocessElmfireRunner
+
+    # Should not raise even though "no-such-binary-on-path" doesn't exist.
+    runner = SubprocessElmfireRunner(["no-such-binary-on-path"])
+    assert runner is not None
+
+
+def test_resolve_elmfire_runner_native_on_unix(tmp_path: Path) -> None:
+    """resolve_elmfire_runner('native') returns SubprocessElmfireRunner."""
+    from wildfire_preproc.elmfire import (
+        SubprocessElmfireRunner,
+        resolve_elmfire_runner,
+    )
+
+    fake = tmp_path / "fake_elmfire"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    runner = resolve_elmfire_runner("native", fake)
+    assert isinstance(runner, SubprocessElmfireRunner)
+
+
+def test_resolve_elmfire_runner_auto_falls_through(tmp_path: Path) -> None:
+    """resolve_elmfire_runner('auto') picks native on macOS/Linux."""
+    import sys
+
+    from wildfire_preproc.elmfire import (
+        SubprocessElmfireRunner,
+        WslElmfireRunner,
+        resolve_elmfire_runner,
+    )
+
+    fake = tmp_path / "fake_elmfire"
+    fake.write_text("#!/bin/sh\nexit 0\n")
+    fake.chmod(0o755)
+    # On macOS/Linux this should be SubprocessElmfireRunner; on Windows WslElmfireRunner.
+    runner = resolve_elmfire_runner("auto", fake)
+    if sys.platform.startswith("win"):
+        assert isinstance(runner, WslElmfireRunner)
+    else:
+        assert isinstance(runner, SubprocessElmfireRunner)
+
+
+def test_resolve_elmfire_runner_rejects_missing_executable(tmp_path: Path) -> None:
+    from wildfire_preproc.elmfire import ElmfireExecutableMissing, resolve_elmfire_runner
+
+    with pytest.raises(ElmfireExecutableMissing):
+        resolve_elmfire_runner("native", tmp_path / "definitely-missing")
+
+
+def test_resolve_elmfire_runner_can_skip_check(tmp_path: Path) -> None:
+    """Tests that need to inject a fake binary should be able to skip the check."""
+    from wildfire_preproc.elmfire import resolve_elmfire_runner
+
+    runner = resolve_elmfire_runner(
+        "native", tmp_path / "missing", check_executable=False
+    )
+    assert runner is not None

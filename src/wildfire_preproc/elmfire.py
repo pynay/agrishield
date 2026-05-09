@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Protocol, cast
+from typing import Literal, Protocol, cast
 
 import geopandas as gpd
 import numpy as np
@@ -21,6 +22,17 @@ from wildfire_preproc.config import JobConfig
 from wildfire_preproc.utils.geometry import bearing_between_points
 
 MPH_PER_MPS = 2.2369362920544
+
+
+class ElmfireExecutableMissingError(FileNotFoundError):
+    """Raised when the configured ELMFIRE binary cannot be found before invocation."""
+
+
+# Backward-compat alias for callers that imported the old short name.
+ElmfireExecutableMissing = ElmfireExecutableMissingError
+
+
+RunnerChoice = Literal["auto", "wsl", "native"]
 
 
 @dataclass(frozen=True)
@@ -91,12 +103,31 @@ class SubprocessElmfireRunner:
         command: Sequence[str],
         timeout_s: float | None = None,
         env: Mapping[str, str] | None = None,
+        check_executable: bool = True,
     ):
         if not command:
             raise ValueError("ELMFIRE command must not be empty")
         self._command = tuple(command)
         self._timeout_s = timeout_s
         self._env = dict(env) if env is not None else None
+        if check_executable:
+            self._validate_executable()
+
+    def _validate_executable(self) -> None:
+        """Confirm the executable exists before any subprocess is started.
+
+        We treat the first command token as the binary path. If it contains
+        a path separator (e.g. './elmfire' or absolute path) the file must
+        exist; otherwise we assume it's on PATH and skip the check.
+        """
+        head = self._command[0]
+        if "/" in head or "\\" in head:
+            path = Path(head)
+            if not path.exists():
+                raise ElmfireExecutableMissing(
+                    f"ELMFIRE executable not found at {path}. "
+                    "Build ELMFIRE first or pass a different --executable."
+                )
 
     def run(self, spec: ElmfireRunSpec) -> ElmfireRunResult:
         cmd = [
@@ -143,10 +174,16 @@ class WslElmfireRunner:
         executable: Path,
         distro: str = "Ubuntu",
         timeout_s: float | None = None,
+        check_executable: bool = True,
     ):
         self._executable = Path(executable).resolve()
         self._distro = distro
         self._timeout_s = timeout_s
+        if check_executable and not self._executable.exists():
+            raise ElmfireExecutableMissing(
+                f"ELMFIRE executable not found at {self._executable}. "
+                "Build ELMFIRE under WSL first or pass a different --executable."
+            )
 
     def run(self, spec: ElmfireRunSpec) -> ElmfireRunResult:
         started = time.monotonic()
@@ -190,14 +227,21 @@ def run_no_firebreak_elmfire_ensemble(
     simulation_dt_s: float = 30.0,
     dump_interval_s: float = 3_600.0,
     fail_fast: bool = True,
+    firebreak_mask_path: Path | None = None,
 ) -> ElmfireEnsembleResult:
-    """Run 8 no-firebreak ELMFIRE simulations around the protected polygon.
+    """Run 8 ELMFIRE simulations around the protected polygon.
 
     The existing preprocessing pipeline must already have produced `job_dir/inputs`.
     Each simulation gets an ELMFIRE-ready `inputs/elmfire.data` deck plus the
     required raster inputs. Wind direction is set as wind-from, so the resulting
     spread direction points from the ignition toward the protected polygon
-    centroid. No fuel or canopy rasters are modified for firebreaks.
+    centroid.
+
+    Pass `firebreak_mask_path` to record (in each scenario's `run_manifest.json`)
+    that this run used a firebreak-modified fbfm40 — typically the mask emitted by
+    `optimize_firebreaks` for a recommended layout. The ensemble itself does not
+    apply the mask; the caller is expected to have swapped in the modified
+    `fbfm40.tif` under `job_dir/inputs/` already.
     """
     job_dir = Path(job_dir).resolve()
     inputs_dir = job_dir / "inputs"
@@ -250,7 +294,7 @@ def run_no_firebreak_elmfire_ensemble(
             config_path=config_path,
             ignition_point_path=ignition_path,
             raster_paths=raster_paths,
-            firebreak_mask_path=None,
+            firebreak_mask_path=firebreak_mask_path,
         )
         _prepare_elmfire_inputs(
             spec=spec,
@@ -482,7 +526,7 @@ def _write_run_manifest(spec: ElmfireRunSpec, crs: str) -> None:
     payload = {
         "run_id": spec.run_id,
         "crs": crs,
-        "no_firebreaks": True,
+        "no_firebreaks": spec.firebreak_mask_path is None,
         "elmfire_data": str(spec.config_path),
         "ignition": {
             "path": str(spec.ignition_point_path),
@@ -501,7 +545,9 @@ def _write_run_manifest(spec: ElmfireRunSpec, crs: str) -> None:
         },
         "inputs_dir": str(spec.inputs_dir),
         "rasters": {key: str(path) for key, path in spec.raster_paths.items()},
-        "firebreak_mask": None,
+        "firebreak_mask": (
+            str(spec.firebreak_mask_path) if spec.firebreak_mask_path is not None else None
+        ),
         "output_dir": str(spec.output_dir),
     }
     (spec.output_dir / "run_manifest.json").write_text(json.dumps(payload, indent=2))
@@ -603,7 +649,7 @@ def _read_mask_aligned(mask_path: Path, reference_path: Path) -> np.ndarray:
             dst_crs=ref.crs,
             resampling=Resampling.nearest,
         )
-    return destination == 1
+    return cast(np.ndarray, destination == 1)
 
 
 def _dilate_bool(mask: np.ndarray, radius: int) -> np.ndarray:
@@ -661,3 +707,39 @@ def _sh_quote(value: str) -> str:
 
 def _list_output_files(path: Path) -> list[Path]:
     return sorted(p for p in path.rglob("*") if p.is_file())
+
+
+def resolve_elmfire_runner(
+    choice: RunnerChoice,
+    executable: Path,
+    *,
+    wsl_distro: str = "Ubuntu",
+    timeout_s: float | None = None,
+    check_executable: bool = True,
+) -> ElmfireRunner:
+    """Build the right runner for the host platform and user choice.
+
+    `choice` is `"auto"`, `"wsl"`, or `"native"`. With `"auto"`:
+    - Windows -> WslElmfireRunner (the project ships ELMFIRE as a Linux binary
+      built under WSL).
+    - macOS / Linux -> SubprocessElmfireRunner with the binary path.
+
+    Both runners now validate the executable exists at construction time
+    (controllable via `check_executable=False` for tests).
+    """
+    if choice == "auto":
+        choice = "wsl" if platform.system().lower().startswith("win") else "native"
+    if choice == "wsl":
+        return WslElmfireRunner(
+            executable=executable,
+            distro=wsl_distro,
+            timeout_s=timeout_s,
+            check_executable=check_executable,
+        )
+    if choice == "native":
+        return SubprocessElmfireRunner(
+            [str(executable)],
+            timeout_s=timeout_s,
+            check_executable=check_executable,
+        )
+    raise ValueError(f"Unsupported ELMFIRE runner: {choice!r}")

@@ -117,10 +117,12 @@ def validate_cmd(job_dir: Path) -> None:
 @click.argument("job_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
 @click.option("--executable", default=None,
               help="ELMFIRE executable name or path.")
-@click.option("--wsl/--native", default=True,
-              help="Run the Linux ELMFIRE executable through WSL, or run natively.")
+@click.option("--runner", "runner_choice",
+              type=click.Choice(["auto", "wsl", "native"], case_sensitive=False),
+              default="auto",
+              help="How to run ELMFIRE. 'auto' picks wsl on Windows, native on macOS/Linux.")
 @click.option("--wsl-distro", default="Ubuntu",
-              help="WSL distro to use when --wsl is enabled.")
+              help="WSL distro to use when --runner=wsl.")
 @click.option("--out", "out_dir", type=click.Path(path_type=Path), default=None,
               help="Output directory. Default: <job_dir>/elmfire_no_firebreak/")
 @click.option("--protected-polygon-crs", default="EPSG:4326",
@@ -139,7 +141,7 @@ def elmfire_cmd(
     job_json: Path,
     job_dir: Path,
     executable: str | None,
-    wsl: bool,
+    runner_choice: str,
     wsl_distro: str,
     out_dir: Path | None,
     protected_polygon_crs: str,
@@ -151,9 +153,8 @@ def elmfire_cmd(
 ) -> None:
     """Run 8 no-firebreak ELMFIRE simulations from an existing preprocessed job."""
     from wildfire_preproc.elmfire import (
-        ElmfireRunner,
-        SubprocessElmfireRunner,
-        WslElmfireRunner,
+        ElmfireExecutableMissing,
+        resolve_elmfire_runner,
         run_no_firebreak_elmfire_ensemble,
     )
 
@@ -164,15 +165,15 @@ def elmfire_cmd(
         )
     else:
         executable_path = Path(executable)
-    runner: ElmfireRunner
-    if wsl:
-        runner = WslElmfireRunner(
+    try:
+        runner = resolve_elmfire_runner(
+            choice=runner_choice.lower(),  # type: ignore[arg-type]
             executable=executable_path,
-            distro=wsl_distro,
+            wsl_distro=wsl_distro,
             timeout_s=timeout_s,
         )
-    else:
-        runner = SubprocessElmfireRunner([str(executable_path)], timeout_s=timeout_s)
+    except ElmfireExecutableMissing as exc:
+        raise click.ClickException(str(exc)) from exc
     result = run_no_firebreak_elmfire_ensemble(
         cfg=cfg,
         job_dir=job_dir,
@@ -199,6 +200,23 @@ def elmfire_cmd(
 @click.option("--firebreak-width-m", default=60.0, type=float, help="Firebreak width in meters.")
 @click.option("--firebreak-cost-per-m", default=12.0, type=float,
               help="Estimated construction cost per meter.")
+@click.option("--rerun-elmfire", is_flag=True, default=False,
+              help="After ranking, re-run ELMFIRE for the recommended layout's modified fbfm40 "
+                   "and populate optimized_result.")
+@click.option("--executable", default=None,
+              help="ELMFIRE executable for --rerun-elmfire (default: "
+                   "elmfire/build/linux/bin/elmfire_2025.0212).")
+@click.option("--runner", "runner_choice",
+              type=click.Choice(["auto", "wsl", "native"], case_sensitive=False),
+              default="auto",
+              help="Runner used by --rerun-elmfire.")
+@click.option("--wsl-distro", default="Ubuntu",
+              help="WSL distro to use when --runner=wsl.")
+@click.option("--job-json", type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              default=None,
+              help="Path to job.json for --rerun-elmfire. If omitted we look in <job_dir>/.. .")
+@click.option("--protected-polygon-crs", default="EPSG:4326",
+              help="CRS of the input protected polygon (default EPSG:4326).")
 def optimize_firebreaks_cmd(
     job_dir: Path,
     baseline_dir: Path | None,
@@ -206,9 +224,38 @@ def optimize_firebreaks_cmd(
     max_layouts: int,
     firebreak_width_m: float,
     firebreak_cost_per_m: float,
+    rerun_elmfire: bool,
+    executable: str | None,
+    runner_choice: str,
+    wsl_distro: str,
+    job_json: Path | None,
+    protected_polygon_crs: str,
 ) -> None:
     """Generate ranked firebreak layouts for an existing preprocessed job."""
     from wildfire_preproc.optimization import FirebreakOptimizationConfig, optimize_firebreaks
+
+    runner = None
+    job_config = None
+    if rerun_elmfire:
+        from wildfire_preproc.elmfire import (
+            ElmfireExecutableMissing,
+            resolve_elmfire_runner,
+        )
+
+        executable_path = (
+            Path(executable) if executable is not None
+            else Path.cwd() / "elmfire" / "build" / "linux" / "bin" / "elmfire_2025.0212"
+        )
+        try:
+            runner = resolve_elmfire_runner(
+                choice=runner_choice.lower(),  # type: ignore[arg-type]
+                executable=executable_path,
+                wsl_distro=wsl_distro,
+            )
+        except ElmfireExecutableMissing as exc:
+            raise click.ClickException(str(exc)) from exc
+        if job_json is not None:
+            job_config = JobConfig.from_json_file(job_json)
 
     result = optimize_firebreaks(
         job_dir=job_dir,
@@ -219,9 +266,17 @@ def optimize_firebreaks_cmd(
             firebreak_width_m=firebreak_width_m,
             firebreak_cost_per_m=firebreak_cost_per_m,
         ),
+        runner=runner,
+        job_config=job_config,
+        protected_polygon_crs=protected_polygon_crs,
     )
     click.echo(f"Recommended layout: {result.recommended_layout_id}")
     click.echo(f"Optimization summary: {result.output_path}")
+    if result.optimized_result is not None:
+        click.echo(
+            f"Optimized rerun: {result.optimized_result.scenarios_failed}/"
+            f"{result.optimized_result.scenarios_run} scenarios still burned the patch"
+        )
 
 
 @main.command("sample")

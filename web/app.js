@@ -844,21 +844,10 @@ function drawWaterOutlets(origin) {
   });
 }
 
-function protectionLayout(origin) {
-  return {
-    outlets: [
-      { label: "Tank", point: pointAtBearing(origin, 320, 760), detail: "Primary tank or hydrant near road access" },
-      { label: "Pump", point: pointAtBearing(origin, 30, 620), detail: "Portable pump pad upwind of farm structures" },
-      { label: "Valve", point: pointAtBearing(origin, 140, 700), detail: "Valve standpipe for hose reach around field edge" },
-    ],
-    access: [
-      "Clear a 4 m equipment lane along the north and west edges.",
-      "Place water tank or hydrant on the road-facing corner.",
-      "Keep pump pad outside the expected flame path and mark it with reflective posts.",
-      "Mow or graze fine fuels inside the farm boundary before red-flag days.",
-    ],
-  };
-}
+// Note: a duplicate `protectionLayout` previously lived here. It hardcoded
+// fixed bearings/access notes and silently overrode the one defined above
+// (line ~738) that respects optimizer/backend results. Removed so the
+// optimizer-driven version is the only definition.
 
 function drawMap() {
   const rect = mapCanvas.getBoundingClientRect();
@@ -1897,6 +1886,8 @@ async function runElmfireSimulation() {
         options: {
           wind_speed_mps: state.windSpeedMps,
           location_preprocess_id: state.locationPreprocessStatus === "ready" ? state.locationPreprocessId : null,
+          optimization_goal: state.optimizationGoal,
+          success_condition: state.successCondition,
         },
       }),
     });
@@ -1971,13 +1962,27 @@ function applyBackendRunStatus(run) {
 }
 
 function backendBaseline(run) {
+  // Prefer the optimizer's own aggregated baseline_result if present — that
+  // already aggregates per-scenario summaries on the backend side.
   if (run.optimization?.baseline_result) return run.optimization.baseline_result;
   const runs = run.summary?.runs || [];
   if (!runs.length) return state.baseline;
+  // Aggregate per-scenario fire metrics across all 8 ignition bearings.
+  // A scenario "fails" when the patch was burned by that ignition; failed
+  // ELMFIRE processes (run.ok === false) also count as failures because we
+  // have no evidence the patch survived.
+  let scenariosFailed = 0;
+  let burnedTotal = 0;
+  let maxFlame = 0;
+  for (const item of runs) {
+    if (item.patch_burned || !item.ok) scenariosFailed += 1;
+    burnedTotal += Number(item.burned_area_inside_patch_m2 || 0);
+    maxFlame = Math.max(maxFlame, Number(item.max_flame_length_near_patch_m || 0));
+  }
   return {
-    scenarios_failed: runs.filter((item) => !item.ok).length,
-    burned_area_inside_patch_m2: 0,
-    max_flame_length_near_patch_m: 0,
+    scenarios_failed: scenariosFailed,
+    burned_area_inside_patch_m2: burnedTotal,
+    max_flame_length_near_patch_m: maxFlame,
   };
 }
 
@@ -2252,7 +2257,15 @@ function bindEvents() {
   els.resultsFile.addEventListener("change", async () => {
     const file = els.resultsFile.files?.[0];
     if (!file) return;
-    state.optimization = JSON.parse(await file.text());
+    const parsed = JSON.parse(await file.text());
+    state.optimization = parsed;
+    // Mirror the same baseline plumbing as the completed-backend-run path so
+    // imported `firebreak_optimization.json` files render identically. If the
+    // file carries its own baseline_result we use it; otherwise leave whatever
+    // baseline was already populated by a prior run.
+    if (parsed?.baseline_result) {
+      state.baseline = parsed.baseline_result;
+    }
     state.runState = "Results loaded";
     state.simProgress = 1;
     setView("firebreak");

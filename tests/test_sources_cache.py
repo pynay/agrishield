@@ -20,3 +20,29 @@ def test_cache_key_differs_by_layer(tmp_path: Path):
     a = cache_key_path(tmp_path, layer=LayerKey.FBFM40, bbox=(1, 2, 3, 4), crs="EPSG:5070")
     b = cache_key_path(tmp_path, layer=LayerKey.DEM, bbox=(1, 2, 3, 4), crs="EPSG:5070")
     assert a != b
+
+
+def test_cache_key_differs_by_crs(tmp_path: Path):
+    a = cache_key_path(tmp_path, layer=LayerKey.FBFM40, bbox=(1, 2, 3, 4), crs="EPSG:5070")
+    b = cache_key_path(tmp_path, layer=LayerKey.FBFM40, bbox=(1, 2, 3, 4), crs="EPSG:4326")
+    assert a != b
+
+
+def test_cache_key_differs_by_version(tmp_path: Path):
+    """LF2022 and LF2023 must not collide on the same layer+bbox+crs."""
+    a = cache_key_path(
+        tmp_path, layer=LayerKey.FBFM40, bbox=(1, 2, 3, 4), crs="EPSG:5070", version="LF2022"
+    )
+    b = cache_key_path(
+        tmp_path, layer=LayerKey.FBFM40, bbox=(1, 2, 3, 4), crs="EPSG:5070", version="LF2023"
+    )
+    assert a != b
+
+
+def test_cache_key_version_none_matches_legacy_unversioned(tmp_path: Path):
+    """version=None preserves the original (pre-versioned) cache key for non-LFPS sources."""
+    legacy = cache_key_path(tmp_path, layer=LayerKey.DEM, bbox=(1, 2, 3, 4), crs="EPSG:5070")
+    unversioned = cache_key_path(
+        tmp_path, layer=LayerKey.DEM, bbox=(1, 2, 3, 4), crs="EPSG:5070", version=None
+    )
+    assert legacy == unversioned

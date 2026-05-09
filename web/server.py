@@ -32,6 +32,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from wildfire_preproc.config import JobConfig  # noqa: E402
+from wildfire_preproc.utils.env import load_env_file  # noqa: E402
+
+# Load `.env` from the project root the same way main.py does, so that
+# `LANDFIRE_EMAIL` and `LANDFIRE_VERSION` are available to background workers
+# that call `run_pipeline` directly (without going through `main.py`).
+load_env_file(PROJECT_ROOT / ".env")
 
 RUNS: dict[str, dict[str, Any]] = {}
 LOCATION_RUNS: dict[str, dict[str, Any]] = {}
@@ -61,7 +67,10 @@ class AgriShieldHandler(SimpleHTTPRequestHandler):
                 run = LOCATION_RUNS.get(run_id)
                 payload = dict(run) if run is not None else None
             if payload is None:
-                self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown location preprocessing run"})
+                self._send_json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": "Unknown location preprocessing run"},
+                )
                 return
             self._send_json(HTTPStatus.OK, payload)
             return
@@ -101,7 +110,10 @@ class AgriShieldHandler(SimpleHTTPRequestHandler):
             return
 
         if save_only:
-            self._send_json(HTTPStatus.CREATED, _job_response(job_dir, job_json, location_geojson, cfg))
+            self._send_json(
+                HTTPStatus.CREATED,
+                _job_response(job_dir, job_json, location_geojson, cfg),
+            )
             return
 
         run_id = uuid.uuid4().hex[:12]
@@ -284,7 +296,6 @@ def _run_location_preprocess(
 ) -> None:
     try:
         from main import rectangle_location
-
         from wildfire_preproc.pipeline import run_pipeline
         from wildfire_preproc.sources.registry import DefaultSourceRegistry
 
@@ -349,6 +360,20 @@ def _run_simulation_job(
         )
         wind_speed = float(options.get("wind_speed_mps", 6.7))
         timeout = options.get("timeout_s")
+        optimization_goal = options.get("optimization_goal")
+        success_condition = options.get("success_condition")
+        # Surface the optimization options the UI sent so a GET on this run
+        # can echo them back even before the backend acts on them. Today only
+        # the default goal/condition are wired through, but this keeps the
+        # round-trip honest instead of silently dropping the fields.
+        if optimization_goal or success_condition:
+            _update_run(
+                run_id,
+                optimization_options={
+                    "goal": optimization_goal,
+                    "success_condition": success_condition,
+                },
+            )
         full_cmd = [
             sys.executable,
             str(PROJECT_ROOT / "main.py"),

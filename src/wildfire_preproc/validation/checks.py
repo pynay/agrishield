@@ -67,6 +67,14 @@ def _check_nodata(ds: rasterio.io.DatasetReader, kind: LayerKind, errors: list[s
             errors.append(f"mask raster must have nodata=None, got {ds.nodata}")
 
 
+# Mask layers that must contain at least one `1` pixel — an all-zero mask
+# means the polygon failed to rasterize against the canonical grid (a real
+# bug, not legitimate empty data).
+_MUST_BE_NONEMPTY_MASKS: frozenset[LayerKey] = frozenset(
+    {LayerKey.PROTECTED_MASK, LayerKey.CANDIDATE_ZONE}
+)
+
+
 def _check_data(
     arr: np.ndarray,
     layer: LayerKey,
@@ -84,6 +92,11 @@ def _check_data(
         unique = set(np.unique(arr).tolist())
         if not unique.issubset({0, 1}):
             errors.append(f"mask values must be in {{0, 1}}, got {sorted(unique)}")
+        if layer in _MUST_BE_NONEMPTY_MASKS and not (arr == 1).any():
+            errors.append(
+                f"{layer.value} is entirely zero — the source polygon did not "
+                "intersect the canonical grid"
+            )
     # Categorical FBFM40 codes
     if layer == LayerKey.FBFM40:
         valid = arr[arr != nodata] if nodata is not None else arr

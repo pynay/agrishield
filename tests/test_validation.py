@@ -133,3 +133,42 @@ def test_format_report_manifest_fail_overrides_passing_results():
     assert "manifest" in report
     # Overall must be FAIL
     assert "overall: FAIL" in report
+
+
+def test_protected_mask_all_zero_fails(tmp_path: Path):
+    """Regression: protected_mask must not silently pass when entirely zero."""
+    grid = _grid()
+    p = tmp_path / "protected_mask.tif"
+    _write(p, np.zeros((10, 10), dtype="uint8"), grid, "uint8", None)
+    res = validate_raster(p, grid, LayerKey.PROTECTED_MASK, LayerKind.MASK)
+    assert not res.ok
+    assert any("entirely zero" in e or "did not intersect" in e for e in res.errors)
+
+
+def test_candidate_zone_all_zero_fails(tmp_path: Path):
+    """Regression: candidate_zone must not silently pass when entirely zero."""
+    grid = _grid()
+    p = tmp_path / "candidate_zone.tif"
+    _write(p, np.zeros((10, 10), dtype="uint8"), grid, "uint8", None)
+    res = validate_raster(p, grid, LayerKey.CANDIDATE_ZONE, LayerKind.MASK)
+    assert not res.ok
+    assert any("entirely zero" in e or "did not intersect" in e for e in res.errors)
+
+
+def test_non_burnable_mask_all_zero_passes(tmp_path: Path):
+    """non_burnable_mask CAN legitimately be empty (pure forest AOI). Must not fail."""
+    grid = _grid()
+    p = tmp_path / "non_burnable_mask.tif"
+    _write(p, np.zeros((10, 10), dtype="uint8"), grid, "uint8", None)
+    res = validate_raster(p, grid, LayerKey.NON_BURNABLE_MASK, LayerKind.MASK)
+    assert res.ok, res.errors
+
+
+def test_protected_mask_non_zero_passes(tmp_path: Path):
+    grid = _grid()
+    p = tmp_path / "protected_mask.tif"
+    arr = np.zeros((10, 10), dtype="uint8")
+    arr[3:7, 3:7] = 1
+    _write(p, arr, grid, "uint8", None)
+    res = validate_raster(p, grid, LayerKey.PROTECTED_MASK, LayerKind.MASK)
+    assert res.ok, res.errors
