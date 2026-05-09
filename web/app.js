@@ -28,10 +28,10 @@ const state = {
   irrigationStatus: "available",
   crewSize: 6,
   overlays: {
-    fuel: true,
-    slope: true,
-    wind: true,
-    edge: true,
+    fuel: false,
+    slope: false,
+    wind: false,
+    edge: false,
     history: false,
   },
   optimizationGoal: "minimize_firebreak_length",
@@ -42,11 +42,20 @@ const state = {
   simProgress: 0,
   simRunning: false,
   simStartedAt: 0,
+  backendRunId: null,
+  backendPollTimer: null,
+  locationPreprocessId: null,
+  locationPreprocessPollTimer: null,
+  locationPreprocessStatus: "idle",
 };
 
 const center = { lon: -116.945, lat: 33.035 };
 const metersPerPixel = 12;
 const simDurationMs = 7800;
+const satelliteZoom = 15;
+const satelliteTiles = new Map();
+const satelliteTileUrl =
+  "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}";
 
 const els = {
   jobStatus: document.querySelector("#jobStatus"),
@@ -285,6 +294,11 @@ function pointAtBearing(origin, bearingDeg, distanceM) {
   };
 }
 
+function setMapCenter(lon, lat) {
+  center.lon = lon;
+  center.lat = lat;
+}
+
 function ignitionPoints() {
   const origin = polygonCentroid(state.polygon);
   return [0, 45, 90, 135, 180, 225, 270, 315].map((bearing) => ({
@@ -316,70 +330,110 @@ function payload() {
   };
 }
 
-function drawMapBackground(rect) {
+function drawMapFallback(rect) {
   const g = mapCtx.createLinearGradient(0, 0, rect.width, rect.height);
-  g.addColorStop(0, "#172115");
-  g.addColorStop(0.48, "#28371e");
-  g.addColorStop(1, "#101312");
+  g.addColorStop(0, "#26311f");
+  g.addColorStop(0.5, "#3a4528");
+  g.addColorStop(1, "#172016");
   mapCtx.fillStyle = g;
   mapCtx.fillRect(0, 0, rect.width, rect.height);
 
   mapCtx.save();
   mapCtx.translate(rect.width / 2, rect.height / 2);
   mapCtx.rotate(-0.28);
-  for (let row = -15; row <= 15; row += 1) {
-    for (let col = -17; col <= 17; col += 1) {
-      const hue = 86 + ((row * 7 + col * 13) % 20);
-      mapCtx.fillStyle = `hsla(${hue}, 38%, ${24 + ((row + col) % 4) * 3}%, 0.72)`;
-      mapCtx.fillRect(col * 86, row * 64, 66, 44);
+  for (let row = -10; row <= 10; row += 1) {
+    for (let col = -12; col <= 12; col += 1) {
+      const lightness = 25 + ((row + col) % 4) * 3;
+      mapCtx.fillStyle = `hsla(93, 24%, ${lightness}%, 0.62)`;
+      mapCtx.fillRect(col * 96, row * 74, 76, 52);
     }
   }
-  mapCtx.strokeStyle = "rgba(255,255,255,0.14)";
-  mapCtx.lineWidth = 2;
-  for (let i = -18; i <= 18; i += 1) {
-    mapCtx.beginPath();
-    mapCtx.moveTo(i * 78, -rect.height);
-    mapCtx.lineTo(i * 78 + 360, rect.height);
-    mapCtx.stroke();
-  }
   mapCtx.restore();
+}
 
-  drawCurvedLine(mapCtx, rect, "#3b7188", 18, [
-    [0.04, 0.72],
-    [0.3, 0.52],
-    [0.46, 0.8],
-    [0.72, 0.54],
-    [0.96, 0.38],
-  ]);
-  drawCurvedLine(mapCtx, rect, "#525957", 7, [
-    [0.02, 0.28],
-    [0.28, 0.22],
-    [0.7, 0.18],
-    [1.02, 0.12],
-  ]);
+function drawMapBackground(rect) {
+  drawMapFallback(rect);
+  drawSatelliteTiles(rect);
+  mapCtx.fillStyle = "rgba(11, 19, 13, 0.16)";
+  mapCtx.fillRect(0, 0, rect.width, rect.height);
+  mapCtx.fillStyle = "rgba(255, 255, 255, 0.86)";
+  mapCtx.font = "700 11px Inter, sans-serif";
+  mapCtx.fillText("Satellite imagery: Esri World Imagery", 12, rect.height - 12);
+}
 
-  mapCtx.strokeStyle = "rgba(255,154,61,0.12)";
-  mapCtx.lineWidth = 1;
-  for (let x = -80; x < rect.width + 80; x += 42) {
-    mapCtx.beginPath();
-    mapCtx.moveTo(x, 0);
-    mapCtx.lineTo(x + 180, rect.height);
-    mapCtx.stroke();
+function drawSatelliteTiles(rect) {
+  const corners = [
+    unproject({ x: 0, y: 0 }),
+    unproject({ x: rect.width, y: 0 }),
+    unproject({ x: 0, y: rect.height }),
+    unproject({ x: rect.width, y: rect.height }),
+  ];
+  const tiles = corners.map((point) => lonLatToTile(point.lon, point.lat, satelliteZoom));
+  const minX = Math.min(...tiles.map((tile) => tile.x)) - 1;
+  const maxX = Math.max(...tiles.map((tile) => tile.x)) + 1;
+  const minY = Math.min(...tiles.map((tile) => tile.y)) - 1;
+  const maxY = Math.max(...tiles.map((tile) => tile.y)) + 1;
+  const limit = 2 ** satelliteZoom;
+  for (let x = minX; x <= maxX; x += 1) {
+    const wrappedX = ((x % limit) + limit) % limit;
+    for (let y = Math.max(0, minY); y <= Math.min(limit - 1, maxY); y += 1) {
+      const image = getSatelliteTile(wrappedX, y, satelliteZoom);
+      if (!image || image.dataset.failed === "true" || !image.complete || !image.naturalWidth) {
+        continue;
+      }
+      const nw = tileToLonLat(x, y, satelliteZoom);
+      const se = tileToLonLat(x + 1, y + 1, satelliteZoom);
+      const topLeft = project({ lon: nw.lon, lat: nw.lat });
+      const bottomRight = project({ lon: se.lon, lat: se.lat });
+      mapCtx.drawImage(
+        image,
+        topLeft.x,
+        topLeft.y,
+        bottomRight.x - topLeft.x,
+        bottomRight.y - topLeft.y,
+      );
+    }
   }
 }
 
-function drawCurvedLine(ctx, rect, color, width, points) {
-  ctx.strokeStyle = color;
-  ctx.lineWidth = width;
-  ctx.lineCap = "round";
-  ctx.beginPath();
-  points.forEach(([x, y], idx) => {
-    const px = x * rect.width;
-    const py = y * rect.height;
-    if (idx === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  });
-  ctx.stroke();
+function getSatelliteTile(x, y, z) {
+  const key = `${z}/${x}/${y}`;
+  if (satelliteTiles.has(key)) return satelliteTiles.get(key);
+  const image = new Image();
+  image.referrerPolicy = "no-referrer";
+  image.decoding = "async";
+  image.onload = () => drawMap();
+  image.onerror = () => {
+    image.dataset.failed = "true";
+  };
+  image.src = satelliteTileUrl
+    .replace("{z}", String(z))
+    .replace("{x}", String(x))
+    .replace("{y}", String(y));
+  satelliteTiles.set(key, image);
+  return image;
+}
+
+function lonLatToTile(lon, lat, z) {
+  const n = 2 ** z;
+  const clampedLat = Math.max(-85.0511, Math.min(85.0511, lat));
+  const latRad = (clampedLat * Math.PI) / 180;
+  return {
+    x: Math.floor(((lon + 180) / 360) * n),
+    y: Math.floor(
+      ((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2) * n,
+    ),
+  };
+}
+
+function tileToLonLat(x, y, z) {
+  const n = 2 ** z;
+  const lon = (x / n) * 360 - 180;
+  const latRad = Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / n)));
+  return {
+    lon,
+    lat: (latRad * 180) / Math.PI,
+  };
 }
 
 function drawCircle(origin, radiusM, stroke, dash = []) {
@@ -1144,16 +1198,24 @@ function updatePanels() {
   els.simClock.textContent = `T+${String(Math.round(state.simProgress * 6)).padStart(2, "0")}:00`;
   if (els.windSourceText) {
     els.windSourceText.textContent =
-      state.runState === "Results loaded"
-        ? "Imported backend result. Weather and fuels came from the result file."
+      state.runState === "Results loaded" || state.runState === "ELMFIRE complete"
+        ? "Backend result loaded. Fuels, terrain, and ignition scenarios came from the ELMFIRE workflow."
         : state.feedLive
           ? "Live weather loaded from Open-Meteo current conditions for the entered location."
           : "Manual preview value. Connect a weather station or import backend results for real field data.";
   }
   els.liveStatus.textContent = state.feedLive ? "Live weather connected" : "No live feed connected";
+  const vegetationText = {
+    idle: "",
+    starting: " Vegetation fetch is starting.",
+    running: " Vegetation and terrain are being fetched.",
+    ready: " Vegetation and terrain are ready.",
+    failed: " Vegetation fetch failed; the simulation will try a full backend run.",
+    unavailable: " Vegetation fetch needs the local backend bridge.",
+  }[state.locationPreprocessStatus] || "";
   els.locationSourceText.textContent = state.feedLive
-    ? `${state.locationName || "Selected location"} current weather updated from Open-Meteo.`
-    : "Enter a location to pull current weather and elevation. The preview updates automatically.";
+    ? `${state.locationName || "Selected location"} current weather updated from Open-Meteo.${vegetationText}`
+    : "Enter a location to pull current weather and elevation. The map will reset for the new location.";
   if (els.feedWind) els.feedWind.textContent = `${state.windSpeedMps} m/s ${windDirectionLabel()}`;
   if (els.feedHumidity) els.feedHumidity.textContent = `${previewHumidity()}%`;
   if (els.feedTemp) els.feedTemp.textContent = `${previewTempF()} F`;
@@ -1542,6 +1604,11 @@ async function loadLiveConditionsByQuery() {
 
 async function loadLiveConditions(lat, lon, label, elevationHint = null) {
   setLoadingFeed(`Loading conditions for ${label}`);
+  clearLocationWorkspace();
+  setMapCenter(lon, lat);
+  state.locationName = label;
+  state.locationPreprocessStatus = "starting";
+  startLocationPreprocess(lat, lon, label);
   const weatherUrl = new URL("https://api.open-meteo.com/v1/forecast");
   weatherUrl.search = new URLSearchParams({
     latitude: String(lat),
@@ -1571,9 +1638,93 @@ async function loadLiveConditions(lat, lon, label, elevationHint = null) {
   state.locationName = label;
   state.feedLive = true;
   if (els.windSpeed) els.windSpeed.value = String(state.windSpeedMps);
-  resetForBoundaryEdit();
   updatePanels();
   drawAll();
+}
+
+function clearLocationWorkspace() {
+  if (state.backendPollTimer) {
+    clearTimeout(state.backendPollTimer);
+    state.backendPollTimer = null;
+  }
+  if (state.locationPreprocessPollTimer) {
+    clearTimeout(state.locationPreprocessPollTimer);
+    state.locationPreprocessPollTimer = null;
+  }
+  state.polygon = [];
+  state.assets = [];
+  state.baseline = null;
+  state.optimization = null;
+  state.backendRunId = null;
+  state.locationPreprocessId = null;
+  state.locationPreprocessStatus = "idle";
+  state.runState = "Draft";
+  state.simRunning = false;
+  state.simProgress = 0;
+}
+
+async function startLocationPreprocess(lat, lon, label) {
+  try {
+    const response = await fetch("/api/location-preprocess", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        lat,
+        lon,
+        label,
+        simulation_radius_m: state.simulationRadiusM,
+        ignition_distance_m: state.ignitionDistanceM,
+        cell_size_m: 30,
+        crs: "EPSG:5070",
+        landfire_version: "LF2023",
+      }),
+    });
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `HTTP ${response.status}`);
+    }
+    const run = await response.json();
+    state.locationPreprocessId = run.run_id;
+    applyLocationPreprocessStatus(run);
+    pollLocationPreprocess();
+  } catch (error) {
+    state.locationPreprocessStatus = "unavailable";
+    els.mapHint.textContent = "Location preprocessing needs web/server.py";
+    console.error(error);
+    updatePanels();
+  }
+}
+
+async function pollLocationPreprocess() {
+  if (!state.locationPreprocessId) return;
+  try {
+    const response = await fetch(`/api/location-preprocess/${state.locationPreprocessId}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const run = await response.json();
+    applyLocationPreprocessStatus(run);
+    if (run.status === "queued" || run.status === "running") {
+      state.locationPreprocessPollTimer = window.setTimeout(pollLocationPreprocess, 4000);
+    }
+  } catch (error) {
+    state.locationPreprocessStatus = "unavailable";
+    console.error(error);
+    updatePanels();
+  }
+}
+
+function applyLocationPreprocessStatus(run) {
+  if (run.status === "completed") {
+    state.locationPreprocessStatus = "ready";
+    els.mapHint.textContent = "Vegetation and terrain data ready for this location";
+  } else if (run.status === "failed") {
+    state.locationPreprocessStatus = "failed";
+    els.mapHint.textContent = run.error || "Location preprocessing failed";
+    console.error(run.log_tail || run);
+  } else {
+    state.locationPreprocessStatus = "running";
+    els.mapHint.textContent = "Fetching vegetation and terrain data for this location";
+  }
+  updatePanels();
 }
 
 async function fetchJson(url) {
@@ -1642,18 +1793,22 @@ function updateGuidance() {
   }
 
   if (state.simRunning) {
-    els.quickTask.textContent = "Simulation running";
-    els.quickDetail.textContent = "Fire fronts are moving across terrain toward the protected polygon.";
-    els.mapHint.textContent = "Live risk simulation in progress";
-    els.simNarrative.textContent = `Preview fire fronts advancing with ${state.windSpeedMps} m/s ${windDirectionLabel()} wind.`;
+    els.quickTask.textContent = state.backendRunId ? "ELMFIRE is running" : "Simulation running";
+    els.quickDetail.textContent = state.backendRunId
+      ? "The backend is preprocessing fuels and terrain, then running 8 ignition scenarios."
+      : "Fire fronts are moving across terrain toward the protected polygon.";
+    els.mapHint.textContent = state.backendRunId ? "Backend simulation in progress" : "Live risk simulation in progress";
+    els.simNarrative.textContent = state.backendRunId
+      ? `Running ELMFIRE with ${state.windSpeedMps} m/s ${windDirectionLabel()} wind.`
+      : `Preview fire fronts advancing with ${state.windSpeedMps} m/s ${windDirectionLabel()} wind.`;
     return;
   }
 
   if (state.runState === "Draft") {
-    els.quickTask.textContent = "Ready to check fire risk";
-    els.quickDetail.textContent = "Press Check risk to run the animated preview.";
-    els.mapHint.textContent = "Check risk shows the fire simulation";
-    els.simNarrative.textContent = "The 3D view below the map will animate terrain, fire fronts, and farm exposure.";
+    els.quickTask.textContent = "Ready to run ELMFIRE";
+    els.quickDetail.textContent = "Update the advisory to run preprocessing and 8 ignition scenarios.";
+    els.mapHint.textContent = "Update Farm Advisory starts the backend simulation";
+    els.simNarrative.textContent = "The backend run will replace the preview with ELMFIRE-based results.";
     return;
   }
 
@@ -1696,10 +1851,132 @@ function runPreviewSimulation() {
   updatePanels();
 }
 
+async function runElmfireSimulation() {
+  if (state.polygon.length < 3) {
+    els.mapHint.textContent = "Add at least three farm boundary points first";
+    updateGuidance();
+    return;
+  }
+  if (state.backendPollTimer) {
+    clearTimeout(state.backendPollTimer);
+    state.backendPollTimer = null;
+  }
+  state.runState = "Starting ELMFIRE";
+  state.simRunning = true;
+  state.simProgress = 0.04;
+  state.simStartedAt = performance.now();
+  state.backendRunId = null;
+  state.baseline = null;
+  state.optimization = null;
+  els.mapHint.textContent =
+    state.locationPreprocessStatus === "ready"
+      ? "Starting ELMFIRE with the fetched location vegetation"
+      : "Starting backend preprocessing and ELMFIRE runs";
+  updatePanels();
+
+  try {
+    const response = await fetch("/api/simulations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job: payload(),
+        options: {
+          wind_speed_mps: state.windSpeedMps,
+          location_preprocess_id: state.locationPreprocessStatus === "ready" ? state.locationPreprocessId : null,
+        },
+      }),
+    });
+    if (!response.ok) {
+      const message = await response.text();
+      throw new Error(message || `HTTP ${response.status}`);
+    }
+    const run = await response.json();
+    state.backendRunId = run.run_id;
+    applyBackendRunStatus(run);
+    pollBackendRun();
+  } catch (error) {
+    state.runState = "Previewed";
+    state.simRunning = false;
+    els.mapHint.textContent = "Backend bridge unavailable; showing local preview instead";
+    console.error(error);
+    runPreviewSimulation();
+  }
+}
+
+async function pollBackendRun() {
+  if (!state.backendRunId) return;
+  try {
+    const response = await fetch(`/api/simulations/${state.backendRunId}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const run = await response.json();
+    applyBackendRunStatus(run);
+    if (run.status === "queued" || run.status === "running") {
+      state.backendPollTimer = window.setTimeout(pollBackendRun, 4000);
+    }
+  } catch (error) {
+    state.runState = "ELMFIRE status unavailable";
+    state.simRunning = false;
+    els.mapHint.textContent = "Could not read backend simulation status";
+    console.error(error);
+    updatePanels();
+  }
+}
+
+function applyBackendRunStatus(run) {
+  if (run.status === "queued") {
+    state.runState = "ELMFIRE queued";
+    state.simRunning = true;
+    state.simProgress = Math.max(state.simProgress, 0.08);
+    els.mapHint.textContent = "Backend run queued";
+  } else if (run.status === "running") {
+    const stageProgress = run.stage === "optimize_firebreaks" ? 0.82 : 0.28;
+    state.runState = run.stage === "optimize_firebreaks" ? "Optimizing firebreaks" : "ELMFIRE running";
+    state.simRunning = true;
+    state.simProgress = Math.max(state.simProgress, stageProgress);
+    els.mapHint.textContent =
+      run.stage === "optimize_firebreaks"
+        ? "ELMFIRE complete; ranking firebreak layouts"
+        : "Running preprocessing and 8 ELMFIRE ignition scenarios";
+  } else if (run.status === "completed") {
+    state.runState = "ELMFIRE complete";
+    state.simRunning = false;
+    state.simProgress = 1;
+    state.optimization = run.optimization || state.optimization;
+    state.baseline = backendBaseline(run);
+    els.mapHint.textContent = `Backend simulation complete: ${run.job_dir}`;
+    setView("firebreak");
+  } else if (run.status === "failed") {
+    state.runState = "ELMFIRE failed";
+    state.simRunning = false;
+    state.simProgress = 0;
+    els.mapHint.textContent = run.error || "Backend simulation failed";
+    console.error(run.log_tail || run);
+  }
+  updatePanels();
+  drawAll();
+}
+
+function backendBaseline(run) {
+  if (run.optimization?.baseline_result) return run.optimization.baseline_result;
+  const runs = run.summary?.runs || [];
+  if (!runs.length) return state.baseline;
+  return {
+    scenarios_failed: runs.filter((item) => !item.ok).length,
+    burned_area_inside_patch_m2: 0,
+    max_flame_length_near_patch_m: 0,
+  };
+}
+
 function tick(time) {
   if (state.simRunning) {
-    state.simProgress = Math.min(1, (time - state.simStartedAt) / simDurationMs);
-    if (state.simProgress >= 1) {
+    const elapsedProgress = (time - state.simStartedAt) / simDurationMs;
+    if (state.backendRunId) {
+      const cap = state.runState === "Optimizing firebreaks" ? 0.94 : 0.78;
+      state.simProgress = Math.min(cap, Math.max(state.simProgress, elapsedProgress * 0.32));
+    } else {
+      state.simProgress = Math.min(1, elapsedProgress);
+    }
+    if (!state.backendRunId && state.simProgress >= 1) {
       state.simRunning = false;
       state.runState = "Previewed";
       state.simProgress = 1;
@@ -1733,6 +2010,7 @@ function setView(view) {
 }
 
 function addSamplePolygon() {
+  setMapCenter(-116.945, 33.035);
   state.polygon = [
     { lon: -116.9532, lat: 33.0392 },
     { lon: -116.9388, lat: 33.0384 },
@@ -1940,7 +2218,7 @@ function bindEvents() {
   });
   document.querySelector("#planMode").addEventListener("click", () => setAppMode("plan"));
   document.querySelector("#alertMode").addEventListener("click", () => setAppMode("alert"));
-  document.querySelector("#runSimulation").addEventListener("click", runPreviewSimulation);
+  document.querySelector("#runSimulation").addEventListener("click", runElmfireSimulation);
   document.querySelector("#loadLiveConditions").addEventListener("click", () => {
     loadLiveConditionsByQuery().catch(showFeedError);
   });
@@ -1949,7 +2227,7 @@ function bindEvents() {
   document.querySelector("#showProtectedSpread").addEventListener("click", () => setSpreadMode("protected"));
   document.querySelector("#mobileSample").addEventListener("click", addSamplePolygon);
   document.querySelector("#mobileUndo").addEventListener("click", undoPoint);
-  document.querySelector("#mobileRun").addEventListener("click", runPreviewSimulation);
+  document.querySelector("#mobileRun").addEventListener("click", runElmfireSimulation);
   document.querySelector("#saveBackendJob").addEventListener("click", saveBackendJob);
   document.querySelector("#exportJob").addEventListener("click", () => exportJson("agrishield-job.json", payload()));
   document.querySelector("#copyPayload").addEventListener("click", async () => {
@@ -2018,7 +2296,7 @@ function setSpreadMode(mode) {
   state.spreadMode = mode;
   document.querySelector("#showBaselineSpread").classList.toggle("active", mode === "baseline");
   document.querySelector("#showProtectedSpread").classList.toggle("active", mode === "protected");
-  if (state.runState === "Draft" && state.polygon.length >= 3) runPreviewSimulation();
+  if (state.runState === "Draft" && state.polygon.length >= 3) runElmfireSimulation();
   else drawAll();
 }
 

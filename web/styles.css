@@ -83,7 +83,7 @@ textarea:focus-visible {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 355px minmax(560px, 1fr) 390px;
+  grid-template-columns: 330px minmax(560px, 1fr) 380px;
   height: 100vh;
   min-height: 760px;
 }
@@ -190,7 +190,7 @@ summary {
 }
 
 .toolbar {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .action-grid {
@@ -203,6 +203,14 @@ summary {
 
 .app-mode-switch {
   margin: 0 0 12px;
+}
+
+.compact-mode {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.primary-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .tool.active,
@@ -339,6 +347,16 @@ summary {
   font-weight: 800;
 }
 
+.quiet-details {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.quiet-details summary {
+  color: var(--ink);
+  font-size: 13px;
+}
+
 .overlay-grid {
   display: grid;
   gap: 8px;
@@ -386,6 +404,10 @@ summary {
 
 .tab {
   min-height: 36px;
+}
+
+.secondary-tab {
+  display: none;
 }
 
 .map-legend {
@@ -456,6 +478,7 @@ summary {
 #mapCanvas {
   cursor: crosshair;
   touch-action: none;
+  background: #26311f;
 }
 
 .quick-card,
@@ -694,6 +717,7 @@ textarea {
 
   .toolbar,
   .location-actions,
+  .primary-actions,
   .metrics,
   .score-list,
   .score-hero,

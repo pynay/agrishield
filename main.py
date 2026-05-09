@@ -5,13 +5,20 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
+import geopandas as gpd
 from pyproj import CRS, Transformer
+from rasterio.crs import CRS as RasterioCRS
+from rasterio.transform import Affine
 from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 
+from wildfire_preproc.align.grid import GridSpec
 from wildfire_preproc.config import JobConfig
+from wildfire_preproc.domain.simulation_domain import build_domain
 from wildfire_preproc.elmfire import (
     ElmfireEnsembleResult,
     ElmfireRunner,
@@ -19,6 +26,9 @@ from wildfire_preproc.elmfire import (
     WslElmfireRunner,
     run_no_firebreak_elmfire_ensemble,
 )
+from wildfire_preproc.masks.candidate import build_candidate_zone_mask
+from wildfire_preproc.masks.non_burnable import build_non_burnable_mask
+from wildfire_preproc.masks.protected import build_protected_mask
 from wildfire_preproc.pipeline import run_pipeline
 from wildfire_preproc.sources.base import RasterSource
 from wildfire_preproc.sources.registry import DefaultSourceRegistry
@@ -90,6 +100,7 @@ def run_location_fire_simulations(
     elmfire_runner: str = "auto",
     wsl_distro: str = "Ubuntu",
     keep_intermediate: bool = True,
+    preprocessed_dir: Path | None = None,
 ) -> ElmfireEnsembleResult:
     """Preprocess a protected location and run 8 no-firebreak ELMFIRE simulations.
 
@@ -122,14 +133,22 @@ def run_location_fire_simulations(
             landfire_version=cfg.landfire_version,
         )
 
-    preprocessed_dir = out_dir / "preprocessed"
-    run_pipeline(
-        cfg=cfg,
-        out_dir=preprocessed_dir,
-        source=source,
-        protected_polygon_crs=protected_polygon_crs,
-        keep_intermediate=keep_intermediate,
-    )
+    if preprocessed_dir is None:
+        preprocessed_dir = out_dir / "preprocessed"
+        run_pipeline(
+            cfg=cfg,
+            out_dir=preprocessed_dir,
+            source=source,
+            protected_polygon_crs=protected_polygon_crs,
+            keep_intermediate=keep_intermediate,
+        )
+    else:
+        preprocessed_dir = Path(preprocessed_dir)
+        _refresh_polygon_dependent_inputs(
+            cfg=cfg,
+            preprocessed_dir=preprocessed_dir,
+            protected_polygon_crs=protected_polygon_crs,
+        )
 
     runner: ElmfireRunner
     if elmfire_runner == "auto":
@@ -151,6 +170,59 @@ def run_location_fire_simulations(
     )
     _write_summary(out_dir / "simulation_summary.json", result)
     return result
+
+
+def _refresh_polygon_dependent_inputs(
+    cfg: JobConfig,
+    preprocessed_dir: Path,
+    protected_polygon_crs: str,
+) -> None:
+    """Reuse fetched vegetation rasters while updating user-polygon domain inputs."""
+    inputs = preprocessed_dir / "inputs"
+    metadata_path = inputs / "metadata.json"
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"missing preprocessed metadata: {metadata_path}")
+    metadata = json.loads(metadata_path.read_text())
+    grid = GridSpec(
+        crs=RasterioCRS.from_string(metadata["grid"]["crs"]),
+        transform=Affine(*metadata["grid"]["transform"]),
+        width=int(metadata["grid"]["width"]),
+        height=int(metadata["grid"]["height"]),
+        cell_size=float(metadata["config"]["cell_size_m"]),
+    )
+    polygon = shape(cfg.protected_polygon)
+    with tempfile.TemporaryDirectory(prefix="agrishield_domain_") as tmp:
+        tmp_dir = Path(tmp)
+        art = build_domain(
+            protected_polygon=polygon,
+            protected_polygon_crs=protected_polygon_crs,
+            target_crs=cfg.crs,
+            simulation_radius_m=cfg.simulation_radius_m,
+            ignition_distance_m=cfg.ignition_distance_m,
+            safety_buffer_m=cfg.safety_buffer_m,
+            out_dir=tmp_dir,
+        )
+        shutil.copy2(art.ignition_points_path, inputs / "ignition_points.geojson")
+        candidate_poly = gpd.read_file(art.candidate_zone_polygon_path).geometry.iloc[0]
+
+    build_protected_mask(
+        protected_polygon=polygon,
+        polygon_crs=protected_polygon_crs,
+        grid=grid,
+        out_path=inputs / "protected_mask.tif",
+    )
+    build_candidate_zone_mask(
+        candidate_polygon=candidate_poly,
+        polygon_crs=cfg.crs,
+        grid=grid,
+        out_path=inputs / "candidate_zone.tif",
+    )
+    build_non_burnable_mask(
+        grid=grid,
+        fbfm40_path=inputs / "fbfm40.tif",
+        sources=cfg.non_burnable_sources,
+        out_path=inputs / "non_burnable_mask.tif",
+    )
 
 
 def san_diego_example_polygon() -> dict[str, Any]:
@@ -249,6 +321,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--wind-speed-mps", type=float, default=6.7)
     parser.add_argument("--simulation-tstop-s", type=float, default=21_600.0)
     parser.add_argument("--cache-dir", type=Path, default=None)
+    parser.add_argument(
+        "--preprocessed-dir",
+        type=Path,
+        default=None,
+        help="Reuse an existing preprocessing directory and refresh polygon-dependent inputs.",
+    )
     parser.add_argument("--elmfire-executable", type=Path, default=DEFAULT_ELMFIRE)
     parser.add_argument(
         "--elmfire-runner",
@@ -291,6 +369,7 @@ def main() -> None:
         elmfire_executable=args.elmfire_executable,
         elmfire_runner=args.elmfire_runner,
         wsl_distro=args.wsl_distro,
+        preprocessed_dir=args.preprocessed_dir,
     )
     print(f"Completed {sum(run.ok for run in result.runs)}/{len(result.runs)} ELMFIRE runs")
     print(f"Summary: {args.out / 'simulation_summary.json'}")

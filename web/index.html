@@ -18,23 +18,24 @@
           <span class="status-pill" id="jobStatus">Draft</span>
         </div>
 
-        <section class="mode-switch app-mode-switch" aria-label="AgriShield mode">
+        <section class="mode-switch app-mode-switch compact-mode" aria-label="AgriShield mode">
           <button class="mode-option active" id="planMode">Plan</button>
-          <button class="mode-option" id="alertMode">Alert</button>
+          <button class="mode-option" id="alertMode">Alerts</button>
         </section>
 
         <section class="panel priority-panel">
           <div class="panel-title">
-            <h2>1. Find Your Farm</h2>
-            <p>Load current weather and elevation, then draw your boundary.</p>
+            <h2>Find Your Farm</h2>
+            <p>Search, use your location, or start from the sample farm.</p>
           </div>
           <label>
             <span>Farm location</span>
             <input id="locationSearch" type="search" placeholder="Town, ZIP, or nearby address" />
           </label>
-          <div class="location-actions">
-            <button id="loadLiveConditions">Load live conditions</button>
-            <button id="useDeviceLocation">Use my location</button>
+          <div class="location-actions primary-actions">
+            <button id="loadLiveConditions">Search</button>
+            <button id="useDeviceLocation">Use location</button>
+            <button id="samplePolygon">Sample farm</button>
           </div>
           <div class="field-note compact-note">
             <strong id="liveStatus">No live feed connected</strong>
@@ -44,8 +45,8 @@
 
         <section class="panel">
           <div class="panel-title">
-            <h2>2. Farm Calendar</h2>
-            <p>These answers turn risk into farm actions.</p>
+            <h2>Farm Details</h2>
+            <p>Only the essentials needed to turn risk into actions.</p>
           </div>
           <label>
             <span>Main crop</span>
@@ -92,47 +93,47 @@
 
         <section class="panel">
           <div class="panel-title">
-            <h2>3. Draw And Mark</h2>
-            <p>Use the map for only what matters: boundary and key assets.</p>
+            <h2>Boundary</h2>
+            <p>Tap the satellite map to trace the protected farm area.</p>
           </div>
           <div class="toolbar compact">
-            <button class="tool active" id="drawMode">Draw</button>
-            <button class="tool" id="editPointMode">Move</button>
-            <button class="tool" id="deletePointMode">Delete point</button>
-            <button class="tool" id="assetMode">Add asset</button>
-          </div>
-          <label>
-            <span>Asset to add</span>
-            <select id="assetType">
-              <option value="crop">Crop zone</option>
-              <option value="high_value_crop">High-value crop</option>
-              <option value="barn">Barn / structure</option>
-              <option value="equipment">Equipment storage</option>
-              <option value="fence">Fence line</option>
-              <option value="livestock">Livestock area</option>
-              <option value="road">Access road</option>
-              <option value="water">Water point</option>
-            </select>
-          </label>
-          <div class="location-actions">
+            <button class="tool active" id="drawMode">Draw boundary</button>
             <button id="undoPoint">Undo point</button>
-            <button id="clearPolygon">Clear boundary</button>
-          </div>
-          <div class="location-actions">
-            <button id="samplePolygon">Use sample farm</button>
-            <button id="clearAssets">Clear assets</button>
           </div>
           <dl class="metrics">
             <div><dt>Boundary points</dt><dd id="vertexCount">0</dd></div>
             <div><dt>Farm size</dt><dd id="areaEstimate">0 ha</dd></div>
           </dl>
-          <p class="inline-help" id="assetHint">Tip: choose Move, then drag a boundary corner.</p>
+          <details class="quiet-details">
+            <summary>Edit tools</summary>
+            <div class="toolbar compact">
+              <button class="tool" id="editPointMode">Move point</button>
+              <button class="tool" id="deletePointMode">Delete point</button>
+              <button class="tool" id="assetMode">Add asset</button>
+              <button id="clearPolygon">Clear boundary</button>
+            </div>
+            <label>
+              <span>Asset to add</span>
+              <select id="assetType">
+                <option value="crop">Crop zone</option>
+                <option value="high_value_crop">High-value crop</option>
+                <option value="barn">Barn / structure</option>
+                <option value="equipment">Equipment storage</option>
+                <option value="fence">Fence line</option>
+                <option value="livestock">Livestock area</option>
+                <option value="road">Access road</option>
+                <option value="water">Water point</option>
+              </select>
+            </label>
+            <button id="clearAssets" class="wide">Clear assets</button>
+          </details>
+          <p class="inline-help" id="assetHint">Tip: drag a point to adjust the boundary.</p>
         </section>
 
         <section class="panel">
           <div class="panel-title">
-            <h2>4. Advisory Style</h2>
-            <p>Choose how much disruption is acceptable.</p>
+            <h2>Advisory</h2>
+            <p>Choose the level of intervention, then update the plan.</p>
           </div>
           <label>
             <span>Preparedness mode</span>
@@ -142,11 +143,14 @@
               <option value="maximum">Maximum Protection</option>
             </select>
           </label>
-          <div class="mode-switch" aria-label="Simulation display mode">
-            <button class="mode-option active" id="showBaselineSpread">Before actions</button>
-            <button class="mode-option" id="showProtectedSpread">After actions</button>
-          </div>
           <button class="primary wide" id="runSimulation">Update Farm Advisory</button>
+          <details class="quiet-details">
+            <summary>Compare spread</summary>
+            <div class="mode-switch" aria-label="Simulation display mode">
+              <button class="mode-option active" id="showBaselineSpread">Before actions</button>
+              <button class="mode-option" id="showProtectedSpread">After actions</button>
+            </div>
+          </details>
         </section>
 
         <section class="panel secondary-tools">
@@ -157,10 +161,10 @@
           <details>
             <summary>Risk layers</summary>
             <div class="overlay-grid">
-              <label><input type="checkbox" id="overlayFuel" checked /> Fuel load</label>
-              <label><input type="checkbox" id="overlaySlope" checked /> Slope</label>
-              <label><input type="checkbox" id="overlayWind" checked /> Wind</label>
-              <label><input type="checkbox" id="overlayEdge" checked /> Wildland edge</label>
+              <label><input type="checkbox" id="overlayFuel" /> Fuel load</label>
+              <label><input type="checkbox" id="overlaySlope" /> Slope</label>
+              <label><input type="checkbox" id="overlayWind" /> Wind</label>
+              <label><input type="checkbox" id="overlayEdge" /> Wildland edge</label>
               <label><input type="checkbox" id="overlayHistory" /> Historical risk</label>
             </div>
           </details>
@@ -191,11 +195,11 @@
         <div class="topbar">
           <nav class="tabs" aria-label="Views">
             <button class="tab active" data-view="setup">Overview</button>
-            <button class="tab" data-view="baseline">7-day risk</button>
+            <button class="tab" data-view="baseline">Risk</button>
             <button class="tab" data-view="firebreak">Action plan</button>
-            <button class="tab" data-view="alerts">Alert mode</button>
             <button class="tab" data-view="report">Report</button>
-            <button class="tab" data-view="compare">Details</button>
+            <button class="tab secondary-tab" data-view="alerts">Alerts</button>
+            <button class="tab secondary-tab" data-view="compare">Details</button>
           </nav>
           <div class="map-legend">
             <span><i class="protected"></i>Farm</span>
