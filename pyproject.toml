@@ -1,0 +1,70 @@
+[project]
+name = "wildfire-preproc"
+version = "0.1.0"
+description = "LANDFIRE/3DEP preprocessing pipeline producing ELMFIRE-ready raster outputs."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "rasterio>=1.3.10,<2",
+    "geopandas>=0.14,<2",
+    "shapely>=2.0,<3",
+    "pyproj>=3.6",
+    "numpy>=1.26,<3",
+    "scipy>=1.11",
+    "pydantic>=2.5,<3",
+    "requests>=2.31",
+    "tenacity>=8.2",
+    "click>=8.1",
+    "tqdm>=4.66",
+]
+
+[project.scripts]
+wildfire-preproc = "wildfire_preproc.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "responses>=0.25",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "types-requests",
+    "types-shapely>=2.1.0.20260508",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wildfire_preproc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["live: tests that hit live LFPS/3DEP APIs"]
+addopts = "-m 'not live'"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["rasterio", "rasterio.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["geopandas", "geopandas.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["scipy", "scipy.*"]
+ignore_missing_imports = true
