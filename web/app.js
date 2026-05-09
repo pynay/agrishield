@@ -482,21 +482,247 @@ function drawFireSpread() {
   });
 }
 
-function syntheticSegments(origin) {
-  const bearings = [315, 0, 45];
-  return bearings.map((bearing, idx) => {
-    const a = pointAtBearing(origin, bearing - 16, 1100 + idx * 120);
-    const b = pointAtBearing(origin, bearing + 16, 1100 + idx * 120);
-    return {
-      segment_id: `break_${bearing}`,
-      geometry: [
-        [a.lon, a.lat],
-        [b.lon, b.lat],
-      ],
-      length_m: 900 + idx * 140,
-      estimated_cost: 12000 + idx * 2100,
-    };
+function optimizeFarmPlan() {
+  if (state.polygon.length < 3) return emptyPlan();
+  const origin = polygonCentroid(state.polygon);
+  const profile = protectionProfile();
+  const candidates = generateActionCandidates(origin)
+    .map((candidate) => scoreCandidate(candidate, origin, profile))
+    .sort((a, b) => b.netBenefit - a.netBenefit);
+  const count = selectedActionCount(candidates);
+  const selected = diversifyCandidates(candidates, count);
+  const segments = selected.map((candidate, idx) => ({
+    segment_id: `${candidate.kind}_${candidate.bearing}_${idx + 1}`,
+    geometry: candidate.geometry,
+    length_m: candidate.length_m,
+    estimated_cost: candidate.estimated_cost,
+    action_kind: candidate.kind,
+    risk_reduction: candidate.risk_reduction,
+    disruption_score: candidate.disruption_score,
+    effort: candidate.effort,
+    explanation: candidate.explanation,
+  }));
+  const outlets = placeWaterOutlets(origin, selected);
+  const layouts = buildRankedLayouts(candidates, selected, profile);
+  return {
+    recommended_layout_id: `${state.protectionMode}_minimal_disruption_plan`,
+    firebreak_segments: segments,
+    water_outlets: outlets,
+    ranked_layouts: layouts,
+    selected_actions: selected,
+  };
+}
+
+function emptyPlan() {
+  return {
+    recommended_layout_id: "-",
+    firebreak_segments: [],
+    water_outlets: [],
+    ranked_layouts: [],
+    selected_actions: [],
+  };
+}
+
+function generateActionCandidates(origin) {
+  const bearings = [0, 45, 90, 135, 180, 225, 270, 315];
+  const profile = protectionProfile();
+  return bearings.map((bearing) => {
+    const distance = 660 + wildfireRiskScore() * 4;
+    const length = (720 + wildfireRiskScore() * 6) * profile.multiplier;
+    return makeCandidate(origin, bearing, distance, length, "firebreak");
   });
+}
+
+function makeCandidate(origin, bearing, distanceM, lengthM, kind) {
+  const midpoint = pointAtBearing(origin, bearing, distanceM);
+  const start = pointAtBearing(midpoint, bearing - 90, lengthM / 2);
+  const end = pointAtBearing(midpoint, bearing + 90, lengthM / 2);
+  return {
+    kind,
+    bearing,
+    midpoint,
+    geometry: [
+      [start.lon, start.lat],
+      [end.lon, end.lat],
+    ],
+    length_m: lengthM,
+    estimated_cost: lengthM * effortCostPerMeter(kind),
+  };
+}
+
+function scoreCandidate(candidate, origin, profile) {
+  const windAlignment = directionalAlignment(candidate.bearing, state.windDirectionDeg);
+  const wildlandEdge = directionalAlignment(candidate.bearing, 315) * 0.7 + directionalAlignment(candidate.bearing, 270) * 0.3;
+  const assetProtection = assetProtectionScore(candidate, origin);
+  const cropDisruption = cropDisruptionScore(candidate);
+  const harvestUrgency = state.harvestWindow === "now" ? 0.16 : state.harvestWindow === "week" ? 0.1 : 0.02;
+  const riskPressure = wildfireRiskScore() / 100;
+  const riskReduction = Math.round(
+    10 +
+      windAlignment * 24 +
+      wildlandEdge * 20 +
+      assetProtection * 22 +
+      riskPressure * 18 +
+      harvestUrgency * 18,
+  );
+  const disruption = Math.round((cropDisruption * 55 + candidate.length_m / 1100) / profile.multiplier);
+  const effort = effortLevel(candidate.estimated_cost, candidate.length_m);
+  const netBenefit = riskReduction * 2.2 - disruption * 1.35 - candidate.estimated_cost / 1800;
+  return {
+    ...candidate,
+    risk_reduction: Math.max(4, Math.min(90, riskReduction)),
+    disruption_score: Math.max(1, Math.min(100, disruption)),
+    effort,
+    netBenefit,
+    explanation: candidateExplanation(candidate, windAlignment, wildlandEdge, assetProtection),
+  };
+}
+
+function selectedActionCount(candidates) {
+  const risk = wildfireRiskScore();
+  if (state.protectionMode === "low") return 1;
+  if (state.protectionMode === "maximum") return Math.min(4, candidates.length);
+  return risk > 62 ? 3 : 2;
+}
+
+function diversifyCandidates(candidates, count) {
+  const selected = [];
+  candidates.forEach((candidate) => {
+    if (selected.length >= count) return;
+    const tooClose = selected.some((item) => bearingDiff(item.bearing, candidate.bearing) < 45);
+    if (!tooClose) selected.push(candidate);
+  });
+  return selected.length >= count ? selected : candidates.slice(0, count);
+}
+
+function buildRankedLayouts(candidates, selected, profile) {
+  const top = selected.length ? selected : candidates.slice(0, 1);
+  return [
+    layoutSummary(`${state.protectionMode}_recommended`, top),
+    layoutSummary("lower_disruption", candidates.slice(0, Math.max(1, top.length - 1))),
+    layoutSummary("higher_protection", candidates.slice(0, Math.min(candidates.length, top.length + 1))),
+  ].map((layout, idx) => ({
+    ...layout,
+    score: Math.round(layout.disruption_score * 1.4 + layout.estimated_cost / 1500 - layout.risk_reduction * 2 + idx * 4),
+    mode: profile.name,
+  }));
+}
+
+function layoutSummary(layoutId, candidates) {
+  const length = candidates.reduce((sum, item) => sum + item.length_m, 0);
+  const cost = candidates.reduce((sum, item) => sum + item.estimated_cost, 0);
+  const riskReduction = candidates.reduce((sum, item) => sum + item.risk_reduction, 0);
+  const disruption = candidates.reduce((sum, item) => sum + item.disruption_score, 0);
+  return {
+    layout_id: layoutId,
+    firebreak_length_m: length,
+    estimated_cost: cost,
+    risk_reduction: Math.min(90, riskReduction),
+    disruption_score: disruption,
+  };
+}
+
+function assetProtectionScore(candidate, origin) {
+  if (!state.assets.length) return 0.25;
+  return Math.min(
+    1,
+    state.assets.reduce((score, asset) => {
+      const assetBearing = bearingFromTo(origin, asset.point);
+      const directional = directionalAlignment(candidate.bearing, assetBearing);
+      const value = assetValue(asset.type);
+      return score + directional * value;
+    }, 0) / 3.2,
+  );
+}
+
+function cropDisruptionScore(candidate) {
+  const cropAssets = state.assets.filter((asset) => ["crop", "high_value_crop"].includes(asset.type));
+  if (!cropAssets.length) return state.cropType === "mixed" ? 0.35 : 0.2;
+  return Math.min(
+    1,
+    cropAssets.reduce((sum, asset) => sum + directionalAlignment(candidate.bearing, bearingFromTo(polygonCentroid(state.polygon), asset.point)), 0) /
+      cropAssets.length,
+  );
+}
+
+function candidateExplanation(candidate, windAlignment, wildlandEdge, assetProtection) {
+  const reasons = [];
+  if (windAlignment > 0.65) reasons.push(`lines up with ${windDirectionLabel()} wind exposure`);
+  if (wildlandEdge > 0.55) reasons.push("faces the mock wildland/fuel edge");
+  if (assetProtection > 0.45) reasons.push("protects marked farm assets");
+  if (!reasons.length) reasons.push("adds backup access and low-fuel space");
+  return `Recommended on the ${bearingName(candidate.bearing)} side because it ${reasons.join(", ")}.`;
+}
+
+function placeWaterOutlets(origin, selected) {
+  const sourceBearings = selected.length ? selected.map((item) => item.bearing) : [315];
+  const primary = sourceBearings[0];
+  return [
+    waterOutlet("Tank", pointAtBearing(origin, primary - 28, 520), "Primary tank or hydrant near the highest-priority action line"),
+    waterOutlet("Pump", pointAtBearing(origin, primary + 28, 620), "Portable pump pad outside the expected flame path"),
+    waterOutlet("Valve", pointAtBearing(origin, primary + 115, 700), "Standpipe or hose connection for the far field edge"),
+  ];
+}
+
+function waterOutlet(label, point, detail) {
+  return { label, point, detail };
+}
+
+function protectionLayout(origin) {
+  const plan = state.optimization || optimizeFarmPlan();
+  return {
+    outlets: plan.water_outlets || [],
+    access: [
+      `Clear the lane closest to the ${bearingName(plan.selected_actions?.[0]?.bearing ?? 315)} action line first.`,
+      "Keep equipment and fuel storage away from the highlighted risk path.",
+      "Stage water where crews can reach it without crossing crop rows.",
+      "Use low-fuel buffers near barns, high-value crop blocks, and livestock areas.",
+    ],
+  };
+}
+
+function effortCostPerMeter(kind) {
+  return kind === "firebreak" ? 12 : 8;
+}
+
+function effortLevel(cost, length) {
+  if (cost < 11000 && length < 900) return "Low";
+  if (cost < 22000) return "Medium";
+  return "High";
+}
+
+function assetValue(type) {
+  return {
+    high_value_crop: 1,
+    barn: 0.95,
+    equipment: 0.85,
+    livestock: 0.9,
+    water: 0.65,
+    road: 0.55,
+    crop: 0.5,
+    fence: 0.35,
+  }[type] || 0.45;
+}
+
+function directionalAlignment(a, b) {
+  return Math.max(0, Math.cos((bearingDiff(a, b) * Math.PI) / 180));
+}
+
+function bearingDiff(a, b) {
+  return Math.abs(((a - b + 540) % 360) - 180);
+}
+
+function bearingFromTo(a, b) {
+  const mPerDegLat = 111_320;
+  const mPerDegLon = Math.cos((a.lat * Math.PI) / 180) * mPerDegLat;
+  const dx = (b.lon - a.lon) * mPerDegLon;
+  const dy = (b.lat - a.lat) * mPerDegLat;
+  return (90 - (Math.atan2(dy, dx) * 180) / Math.PI + 360) % 360;
+}
+
+function bearingName(bearing) {
+  const dirs = ["north", "northeast", "east", "southeast", "south", "southwest", "west", "northwest"];
+  return dirs[Math.round(bearing / 45) % dirs.length];
 }
 
 function drawFirebreaks() {
@@ -510,7 +736,7 @@ function drawFirebreaks() {
   const origin = polygonCentroid(state.polygon);
   const segments = state.optimization?.firebreak_segments?.length
     ? state.optimization.firebreak_segments
-    : syntheticSegments(origin);
+    : optimizeFarmPlan().firebreak_segments;
 
   segments.forEach((segment) => {
     const coords = segment.geometry || [];
@@ -789,24 +1015,30 @@ function drawTerrainFire(time) {
   if (state.polygon.length < 3 || state.runState === "Draft") return;
   const rect = terrainCanvas.getBoundingClientRect();
   const progress = state.simProgress || 0.05;
+  const protectedMode = state.spreadMode === "protected";
+  const protectedBearings = new Set((state.optimization?.selected_actions || []).map((item) => item.bearing));
   for (let i = 0; i < 8; i += 1) {
     const angle = (Math.PI * 2 * i) / 8;
+    const bearing = i * 45;
+    const slowed = protectedMode && [...protectedBearings].some((item) => bearingDiff(item, bearing) <= 45);
+    const localProgress = slowed ? Math.min(progress, 0.58) : progress;
+    const intensity = slowed ? 0.46 : 1;
     const sx = Math.cos(angle) * 280;
     const sz = Math.sin(angle) * 220;
-    const cx = sx * (1 - progress);
-    const cz = sz * (1 - progress);
+    const cx = sx * (1 - localProgress);
+    const cz = sz * (1 - localProgress);
     const p = terrainPoint(cx, cz, rect, time);
-    const plume = 28 + progress * 42 + Math.sin(time * 0.006 + i) * 8;
+    const plume = (28 + localProgress * 42 + Math.sin(time * 0.006 + i) * 8) * intensity;
     const g = terrainCtx.createRadialGradient(p.x, p.y, 4, p.x, p.y, plume);
-    g.addColorStop(0, "rgba(255,238,112,0.95)");
-    g.addColorStop(0.32, "rgba(255,112,42,0.78)");
+    g.addColorStop(0, `rgba(255,238,112,${0.95 * intensity})`);
+    g.addColorStop(0.32, `rgba(255,112,42,${0.78 * intensity})`);
     g.addColorStop(1, "rgba(255,38,25,0)");
     terrainCtx.fillStyle = g;
     terrainCtx.beginPath();
     terrainCtx.arc(p.x, p.y, plume, 0, Math.PI * 2);
     terrainCtx.fill();
 
-    terrainCtx.strokeStyle = "rgba(255,90,42,0.5)";
+    terrainCtx.strokeStyle = `rgba(255,90,42,${0.5 * intensity})`;
     terrainCtx.lineWidth = 3;
     terrainCtx.beginPath();
     terrainCtx.moveTo(p.x, p.y);
@@ -818,18 +1050,13 @@ function drawTerrainFire(time) {
 function drawTerrainBreaks(rect, time) {
   const showProtectedSpread = state.activeView === "baseline" && state.spreadMode === "protected";
   if (!showProtectedSpread && !["firebreak", "compare", "report"].includes(state.activeView)) return;
-  const segments = [
-    [-150, -42, 150, -36],
-    [-128, 44, 124, 54],
-    [-96, -100, 104, 96],
-  ];
+  const plan = state.optimization || optimizeFarmPlan();
+  const segments = plan.firebreak_segments.map((segment) => terrainSegmentForBearing(segment.geometry, rect, time));
   terrainCtx.strokeStyle = "#f5f7fb";
   terrainCtx.lineWidth = 5;
   terrainCtx.shadowColor = "rgba(86,182,255,0.8)";
   terrainCtx.shadowBlur = 16;
-  segments.forEach(([x1, z1, x2, z2]) => {
-    const a = terrainPoint(x1, z1, rect, time);
-    const b = terrainPoint(x2, z2, rect, time);
+  segments.forEach(([a, b]) => {
     terrainCtx.beginPath();
     terrainCtx.moveTo(a.x, a.y);
     terrainCtx.lineTo(b.x, b.y);
@@ -840,13 +1067,11 @@ function drawTerrainBreaks(rect, time) {
 }
 
 function drawTerrainOutlets(rect, time) {
-  const outlets = [
-    [-210, -120, "Tank"],
-    [190, -70, "Pump"],
-    [125, 118, "Valve"],
-  ];
-  outlets.forEach(([x, z, label]) => {
-    const p = terrainPoint(x, z, rect, time);
+  const plan = state.optimization || optimizeFarmPlan();
+  const outlets = plan.water_outlets || [];
+  outlets.forEach((outlet, idx) => {
+    const angle = ((idx * 125 + (plan.selected_actions?.[0]?.bearing || 315)) * Math.PI) / 180;
+    const p = terrainPoint(Math.cos(angle) * 230, Math.sin(angle) * 170, rect, time);
     terrainCtx.fillStyle = "#56b6ff";
     terrainCtx.strokeStyle = "#eaf8ff";
     terrainCtx.lineWidth = 2;
@@ -859,8 +1084,19 @@ function drawTerrainOutlets(rect, time) {
     terrainCtx.shadowBlur = 0;
     terrainCtx.fillStyle = "#eaf8ff";
     terrainCtx.font = "800 11px Inter, sans-serif";
-    terrainCtx.fillText(label, p.x + 12, p.y - 4);
+    terrainCtx.fillText(outlet.label, p.x + 12, p.y - 4);
   });
+}
+
+function terrainSegmentForBearing(geometry, rect, time) {
+  const [start, end] = geometry;
+  const origin = polygonCentroid(state.polygon);
+  const aBearing = bearingFromTo(origin, { lon: start[0], lat: start[1] });
+  const bBearing = bearingFromTo(origin, { lon: end[0], lat: end[1] });
+  return [
+    terrainPoint(Math.cos((aBearing * Math.PI) / 180) * 210, Math.sin((aBearing * Math.PI) / 180) * 150, rect, time),
+    terrainPoint(Math.cos((bBearing * Math.PI) / 180) * 210, Math.sin((bBearing * Math.PI) / 180) * 150, rect, time),
+  ];
 }
 
 function drawTerrainTelemetry(rect, time) {
@@ -979,9 +1215,9 @@ function defaultScenarios() {
 }
 
 function renderOptimization() {
-  const synthetic = state.polygon.length >= 3 ? syntheticSegments(polygonCentroid(state.polygon)) : [];
-  const segments = state.optimization?.firebreak_segments || synthetic;
-  const recommended = state.optimization?.recommended_layout_id || (segments.length ? "break_arc_01" : "-");
+  const plan = state.optimization || optimizeFarmPlan();
+  const segments = plan.firebreak_segments || [];
+  const recommended = plan.recommended_layout_id || "-";
   const totalLength = segments.reduce((sum, segment) => sum + (segment.length_m || 0), 0);
   const totalCost = segments.reduce((sum, segment) => sum + (segment.estimated_cost || 0), 0);
 
@@ -1001,11 +1237,7 @@ function renderOptimization() {
   });
 
   els.compareList.innerHTML = "";
-  const layouts = state.optimization?.ranked_layouts || [
-    { layout_id: "break_arc_01", score: 92, firebreak_length_m: totalLength, estimated_cost: totalCost },
-    { layout_id: "short_north_cut", score: 118, firebreak_length_m: totalLength * 0.82, estimated_cost: totalCost * 0.77 },
-    { layout_id: "full_rim_clear", score: 136, firebreak_length_m: totalLength * 1.18, estimated_cost: totalCost * 1.12 },
-  ];
+  const layouts = plan.ranked_layouts || [];
   layouts.forEach((layout) => {
     const card = document.createElement("article");
     card.className = "compare-card";
@@ -1023,8 +1255,14 @@ function renderBuildList() {
   els.buildList.innerHTML = "";
   const origin = state.polygon.length >= 3 ? polygonCentroid(state.polygon) : center;
   const layout = protectionLayout(origin);
+  const plan = state.optimization || optimizeFarmPlan();
   const items = [
-    { title: "Firebreak placement", detail: "Build the glowing white arc on the upwind and north/west exposure sides first." },
+    {
+      title: "Action-line placement",
+      detail:
+        plan.selected_actions?.[0]?.explanation ||
+        "Build the highest-ranked low-fuel action line first once a boundary is available.",
+    },
     ...layout.outlets.map((outlet) => ({ title: outlet.label, detail: outlet.detail })),
     ...layout.access.map((detail, idx) => ({ title: `Field step ${idx + 1}`, detail })),
   ];
@@ -1055,6 +1293,8 @@ function renderRecommendations() {
 
 function generateRecommendations() {
   const profile = protectionProfile();
+  const plan = state.optimization || optimizeFarmPlan();
+  const firstAction = plan.selected_actions?.[0];
   const cropLabel = {
     hay: "hay or forage",
     grapes: "grapes",
@@ -1076,11 +1316,13 @@ function generateRecommendations() {
       text: operationalPriorityText(cropLabel),
     },
     {
-      title: `${profile.name}: north-west firebreak`,
-      riskReduction: Math.round(profile.reduction * 100),
+      title: `${profile.name}: ${bearingName(firstAction?.bearing ?? 315)} action line`,
+      riskReduction: firstAction?.risk_reduction ?? Math.round(profile.reduction * 100),
       disruption: profile.disruption,
-      effort: profile.effort,
-      text: `Your northwest boundary borders the mock dense-fuel edge and aligns with ${windDirectionLabel()} wind exposure. Add a maintained firebreak on the glowing edge first. This uses ${profile.language}.`,
+      effort: firstAction?.effort ?? profile.effort,
+      text: firstAction
+        ? `${firstAction.explanation} This uses ${profile.language} and scores disruption at ${firstAction.disruption_score}/100.`
+        : `Add the highest-ranked low-fuel action line first. This uses ${profile.language}.`,
     },
     {
       title: "Keep access routes open",
@@ -1239,7 +1481,8 @@ function alertRows() {
 function renderReport() {
   const data = payload();
   const baseline = state.optimization?.baseline_result || state.baseline || {};
-  const recommended = state.optimization?.recommended_layout_id || "break_arc_01";
+  const plan = state.optimization || optimizeFarmPlan();
+  const recommended = plan.recommended_layout_id;
   const boundaryPoints = Math.max(0, data.protected_polygon.coordinates[0].length - 1);
   els.reportText.value = [
     "AgriShield farm fire planning report",
@@ -1261,13 +1504,14 @@ function renderReport() {
     `Estimated risk reduction: ${riskReductionPct()}%`,
     `Estimated land at risk: ${landAtRiskPct()}%`,
     `Preparedness mode: ${protectionProfile().name}`,
-    `Planning goal: ${readableGoal(state.optimizationGoal)}`,
+    `Optimizer basis: wind exposure, mock fuel edge, protected assets, crop disruption, estimated effort`,
     "",
     `Risky test fires without added breaks: ${baseline.scenarios_failed ?? "pending"}`,
     `Farm area at risk in preview: ${Math.round(
       baseline.burned_area_inside_patch_m2 || 0,
     ).toLocaleString()} m2`,
     `Recommended firebreak plan: ${recommended}`,
+    `Selected action lines: ${plan.firebreak_segments.map((segment) => segment.segment_id).join(", ") || "pending"}`,
     "",
     "Use imported backend results before making field decisions.",
   ].join("\n");
@@ -1434,16 +1678,18 @@ function runPreviewSimulation() {
     burned_area_inside_patch_m2: landAtRiskM2(),
     max_flame_length_near_patch_m: Number((1.2 + state.windSpeedMps * 0.24 + wildfireRiskScore() / 80).toFixed(1)),
   };
+  const plan = optimizeFarmPlan();
   state.optimization = {
-    recommended_layout_id: "break_arc_01",
-    firebreak_segments: syntheticSegments(polygonCentroid(state.polygon)),
+    ...plan,
     baseline_result: {
       scenarios_failed: state.baseline.scenarios_failed,
       burned_area_inside_patch_m2: state.baseline.burned_area_inside_patch_m2,
     },
     optimized_result: {
       scenarios_failed: 1,
-      burned_area_inside_patch_m2: Math.round(state.baseline.burned_area_inside_patch_m2 * 0.08),
+      burned_area_inside_patch_m2: Math.round(
+        state.baseline.burned_area_inside_patch_m2 * (1 - protectionProfile().reduction),
+      ),
     },
   };
   setView("baseline");
