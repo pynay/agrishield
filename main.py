@@ -14,6 +14,8 @@ from shapely.geometry import MultiPolygon, Polygon, mapping, shape
 from wildfire_preproc.config import JobConfig
 from wildfire_preproc.elmfire import (
     ElmfireEnsembleResult,
+    ElmfireRunner,
+    SubprocessElmfireRunner,
     WslElmfireRunner,
     run_no_firebreak_elmfire_ensemble,
 )
@@ -85,6 +87,7 @@ def run_location_fire_simulations(
     cache_dir: Path | None = None,
     source: RasterSource | None = None,
     elmfire_executable: Path = DEFAULT_ELMFIRE,
+    elmfire_runner: str = "auto",
     wsl_distro: str = "Ubuntu",
     keep_intermediate: bool = True,
 ) -> ElmfireEnsembleResult:
@@ -114,7 +117,10 @@ def run_location_fire_simulations(
 
     if source is None:
         resolved_cache = cache_dir or (Path.home() / ".cache" / "wildfire-preproc")
-        source = DefaultSourceRegistry(cache_dir=resolved_cache, landfire_version=cfg.landfire_version)
+        source = DefaultSourceRegistry(
+            cache_dir=resolved_cache,
+            landfire_version=cfg.landfire_version,
+        )
 
     preprocessed_dir = out_dir / "preprocessed"
     run_pipeline(
@@ -125,7 +131,16 @@ def run_location_fire_simulations(
         keep_intermediate=keep_intermediate,
     )
 
-    runner = WslElmfireRunner(executable=elmfire_executable, distro=wsl_distro)
+    runner: ElmfireRunner
+    if elmfire_runner == "auto":
+        elmfire_runner = "wsl" if os.name == "nt" else "native"
+    if elmfire_runner == "wsl":
+        runner = WslElmfireRunner(executable=elmfire_executable, distro=wsl_distro)
+    elif elmfire_runner == "native":
+        runner = SubprocessElmfireRunner([str(elmfire_executable)])
+    else:
+        raise ValueError(f"Unsupported ELMFIRE runner: {elmfire_runner}")
+
     result = run_no_firebreak_elmfire_ensemble(
         cfg=cfg,
         job_dir=preprocessed_dir,
@@ -148,7 +163,9 @@ def san_diego_example_polygon() -> dict[str, Any]:
     )
 
 
-def run_san_diego_example(out_dir: Path = Path("jobs/san-diego-farm-example")) -> ElmfireEnsembleResult:
+def run_san_diego_example(
+    out_dir: Path = Path("jobs/san-diego-farm-example"),
+) -> ElmfireEnsembleResult:
     """Run the end-to-end workflow for the bundled San Diego-area example location."""
     return run_location_fire_simulations(
         protected_polygon=san_diego_example_polygon(),
@@ -203,13 +220,21 @@ def _parse_args() -> argparse.Namespace:
         description="Preprocess a protected location and run 8 no-firebreak ELMFIRE simulations."
     )
     location = parser.add_mutually_exclusive_group(required=True)
-    location.add_argument("--location-geojson", type=Path, help="GeoJSON Polygon/MultiPolygon file.")
+    location.add_argument(
+        "--location-geojson",
+        type=Path,
+        help="GeoJSON Polygon/MultiPolygon file.",
+    )
     location.add_argument(
         "--example-san-diego",
         action="store_true",
         help="Use an example farm-sized polygon near Ramona / San Pasqual Valley.",
     )
-    location.add_argument("--center-lon", type=float, help="Center longitude for a rectangular location.")
+    location.add_argument(
+        "--center-lon",
+        type=float,
+        help="Center longitude for a rectangular location.",
+    )
     parser.add_argument("--center-lat", type=float, help="Center latitude for --center-lon.")
     parser.add_argument("--width-m", type=float, default=800.0, help="Rectangle width in meters.")
     parser.add_argument("--height-m", type=float, default=800.0, help="Rectangle height in meters.")
@@ -225,6 +250,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--simulation-tstop-s", type=float, default=21_600.0)
     parser.add_argument("--cache-dir", type=Path, default=None)
     parser.add_argument("--elmfire-executable", type=Path, default=DEFAULT_ELMFIRE)
+    parser.add_argument(
+        "--elmfire-runner",
+        choices=("auto", "wsl", "native"),
+        default="auto",
+        help="How to run ELMFIRE. auto uses WSL on Windows and native subprocess elsewhere.",
+    )
     parser.add_argument("--wsl-distro", default="Ubuntu")
     return parser.parse_args()
 
@@ -258,6 +289,7 @@ def main() -> None:
         simulation_tstop_s=args.simulation_tstop_s,
         cache_dir=args.cache_dir,
         elmfire_executable=args.elmfire_executable,
+        elmfire_runner=args.elmfire_runner,
         wsl_distro=args.wsl_distro,
     )
     print(f"Completed {sum(run.ok for run in result.runs)}/{len(result.runs)} ELMFIRE runs")

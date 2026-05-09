@@ -8,7 +8,7 @@ import subprocess
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Protocol
 
 import geopandas as gpd
@@ -507,8 +507,18 @@ def _write_run_manifest(spec: ElmfireRunSpec, crs: str) -> None:
 
 def _wsl_path(path: Path) -> str:
     resolved = Path(path).resolve()
-    drive = resolved.drive.rstrip(":").lower()
-    rest = resolved.as_posix().split(":", 1)[1]
+    return _windows_path_to_wsl(str(resolved))
+
+
+def _windows_path_to_wsl(path: str) -> str:
+    windows_path = PureWindowsPath(path)
+    drive = windows_path.drive.rstrip(":").lower()
+    if not drive:
+        raise ValueError(
+            "WSL runner requires a Windows drive path. "
+            f"Got {path!r}; use the native ELMFIRE runner on macOS/Linux."
+        )
+    rest = windows_path.as_posix().split(":", 1)[1]
     return f"/mnt/{drive}{rest}"
 
 

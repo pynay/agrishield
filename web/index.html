@@ -3,113 +3,186 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AgriShield Firebreak Planner</title>
+    <title>AgriShield Farm Wildfire Advisor</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
     <main class="app-shell">
-      <aside class="sidebar" aria-label="Simulation controls">
+      <aside class="sidebar" aria-label="Farm setup">
         <div class="brand-row">
           <div class="brand-mark" aria-hidden="true">A</div>
           <div>
             <h1>AgriShield</h1>
-            <p>Simple wildfire planning for farms and fields</p>
+            <p>Wildfire actions for farms, before fire arrives</p>
           </div>
           <span class="status-pill" id="jobStatus">Draft</span>
         </div>
 
-        <section class="progress-panel" aria-label="Planning steps">
-          <div class="step active">
-            <span>1</span>
-            <strong>Mark farm</strong>
-          </div>
-          <div class="step">
-            <span>2</span>
-            <strong>Check fire risk</strong>
-          </div>
-          <div class="step">
-            <span>3</span>
-            <strong>Plan breaks</strong>
-          </div>
+        <section class="mode-switch app-mode-switch" aria-label="AgriShield mode">
+          <button class="mode-option active" id="planMode">Plan</button>
+          <button class="mode-option" id="alertMode">Alert</button>
         </section>
 
         <section class="panel priority-panel">
-          <div class="panel-head">
-            <div>
-              <h2>Your Farm Boundary</h2>
-              <p>Tap the map corners around the land you want to protect.</p>
-            </div>
-            <button class="icon-button" id="clearPolygon" title="Clear polygon" aria-label="Clear polygon">
-              ×
-            </button>
+          <div class="panel-title">
+            <h2>1. Find Your Farm</h2>
+            <p>Load current weather and elevation, then draw your boundary.</p>
+          </div>
+          <label>
+            <span>Farm location</span>
+            <input id="locationSearch" type="search" placeholder="Town, ZIP, or nearby address" />
+          </label>
+          <div class="location-actions">
+            <button id="loadLiveConditions">Load live conditions</button>
+            <button id="useDeviceLocation">Use my location</button>
+          </div>
+          <div class="field-note compact-note">
+            <strong id="liveStatus">No live feed connected</strong>
+            <span id="locationSourceText">Enter a location to pull current weather and elevation.</span>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>2. Farm Calendar</h2>
+            <p>These answers turn risk into farm actions.</p>
+          </div>
+          <label>
+            <span>Main crop</span>
+            <select id="cropType">
+              <option value="hay">Hay / forage</option>
+              <option value="grapes">Grapes / vineyard</option>
+              <option value="orchard">Orchard</option>
+              <option value="vegetables">Vegetables</option>
+              <option value="grain">Grain</option>
+              <option value="mixed">Mixed farm</option>
+            </select>
+          </label>
+          <label>
+            <span>Harvest window</span>
+            <select id="harvestWindow">
+              <option value="now">Ready now</option>
+              <option value="week">Within 7 days</option>
+              <option value="month">Within 30 days</option>
+              <option value="later">Later season</option>
+            </select>
+          </label>
+          <label>
+            <span>Livestock on site</span>
+            <select id="livestockCount">
+              <option value="none">None</option>
+              <option value="small">Small group</option>
+              <option value="large">Large herd/flock</option>
+            </select>
+          </label>
+          <label>
+            <span>Irrigation status</span>
+            <select id="irrigationStatus">
+              <option value="available">Available now</option>
+              <option value="limited">Limited water</option>
+              <option value="none">No irrigation</option>
+            </select>
+          </label>
+          <label>
+            <span>Crew size today</span>
+            <input id="crewSize" type="range" min="0" max="30" step="1" value="6" />
+            <strong id="crewSizeValue">6 people</strong>
+          </label>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>3. Draw And Mark</h2>
+            <p>Use the map for only what matters: boundary and key assets.</p>
           </div>
           <div class="toolbar compact">
-            <button class="tool active" id="drawMode">Draw area</button>
-            <button class="tool" id="undoPoint">Undo point</button>
-            <button class="tool" id="samplePolygon">Use sample</button>
+            <button class="tool active" id="drawMode">Draw</button>
+            <button class="tool" id="editPointMode">Move</button>
+            <button class="tool" id="deletePointMode">Delete point</button>
+            <button class="tool" id="assetMode">Add asset</button>
+          </div>
+          <label>
+            <span>Asset to add</span>
+            <select id="assetType">
+              <option value="crop">Crop zone</option>
+              <option value="high_value_crop">High-value crop</option>
+              <option value="barn">Barn / structure</option>
+              <option value="equipment">Equipment storage</option>
+              <option value="fence">Fence line</option>
+              <option value="livestock">Livestock area</option>
+              <option value="road">Access road</option>
+              <option value="water">Water point</option>
+            </select>
+          </label>
+          <div class="location-actions">
+            <button id="undoPoint">Undo point</button>
+            <button id="clearPolygon">Clear boundary</button>
+          </div>
+          <div class="location-actions">
+            <button id="samplePolygon">Use sample farm</button>
+            <button id="clearAssets">Clear assets</button>
           </div>
           <dl class="metrics">
-            <div>
-              <dt>Map points</dt>
-              <dd id="vertexCount">0</dd>
-            </div>
-            <div>
-              <dt>Farm size</dt>
-              <dd id="areaEstimate">0 ha</dd>
-            </div>
+            <div><dt>Boundary points</dt><dd id="vertexCount">0</dd></div>
+            <div><dt>Farm size</dt><dd id="areaEstimate">0 ha</dd></div>
           </dl>
+          <p class="inline-help" id="assetHint">Tip: choose Move, then drag a boundary corner.</p>
         </section>
 
         <section class="panel">
           <div class="panel-title">
-            <h2>Fire Setup</h2>
-            <p>Use the defaults unless you know local conditions.</p>
+            <h2>4. Advisory Style</h2>
+            <p>Choose how much disruption is acceptable.</p>
           </div>
           <label>
-            <span>How far to check around the farm</span>
-            <input id="simulationRadius" type="range" min="1500" max="10000" step="250" value="5000" />
-            <strong id="simulationRadiusValue">5000 m</strong>
-          </label>
-          <label>
-            <span>Where test fires start</span>
-            <input id="ignitionDistance" type="range" min="1000" max="9500" step="250" value="4500" />
-            <strong id="ignitionDistanceValue">4500 m</strong>
-          </label>
-          <label>
-            <span>Wind speed</span>
-            <input id="windSpeed" type="range" min="0" max="25" step="0.5" value="8" />
-            <strong id="windSpeedValue">8 m/s</strong>
-          </label>
-          <label>
-            <span>What matters most</span>
-            <select id="optimizationGoal">
-              <option value="minimize_firebreak_length">Shortest useful firebreak</option>
-              <option value="minimize_cost">Lowest estimated cost</option>
-              <option value="maximize_risk_reduction">Most protection</option>
+            <span>Preparedness mode</span>
+            <select id="protectionMode">
+              <option value="low">Low Disruption</option>
+              <option value="balanced" selected>Balanced Protection</option>
+              <option value="maximum">Maximum Protection</option>
             </select>
           </label>
-          <label>
-            <span>Good result means</span>
-            <select id="successCondition">
-              <option value="no_burn_inside_polygon">Fire does not reach the farm</option>
-              <option value="reduce_burned_area_90pct">Burned area drops by 90%</option>
-              <option value="no_arrival_under_2h">Fire stays away for 2 hours</option>
-            </select>
-          </label>
+          <div class="mode-switch" aria-label="Simulation display mode">
+            <button class="mode-option active" id="showBaselineSpread">Before actions</button>
+            <button class="mode-option" id="showProtectedSpread">After actions</button>
+          </div>
+          <button class="primary wide" id="runSimulation">Update Farm Advisory</button>
         </section>
 
-        <section class="panel">
+        <section class="panel secondary-tools">
           <div class="panel-title">
-            <h2>Next Actions</h2>
-            <p>Preview uses local estimates. Import real output when the backend run finishes.</p>
+            <h2>Advanced</h2>
+            <p>Optional layers and export tools.</p>
           </div>
-          <div class="action-grid">
-            <button class="primary" id="runSimulation">Check risk</button>
-            <button id="loadResults">Import real results</button>
-            <input id="resultsFile" type="file" accept=".json,application/json" hidden />
-            <button id="saveBackendJob">Save backend job</button>
-            <button id="exportJob">Download job</button>
-            <button id="copyPayload">Copy job</button>
+          <details>
+            <summary>Risk layers</summary>
+            <div class="overlay-grid">
+              <label><input type="checkbox" id="overlayFuel" checked /> Fuel load</label>
+              <label><input type="checkbox" id="overlaySlope" checked /> Slope</label>
+              <label><input type="checkbox" id="overlayWind" checked /> Wind</label>
+              <label><input type="checkbox" id="overlayEdge" checked /> Wildland edge</label>
+              <label><input type="checkbox" id="overlayHistory" /> Historical risk</label>
+            </div>
+          </details>
+          <details>
+            <summary>Backend handoff</summary>
+            <div class="action-grid compact-actions">
+              <button id="loadResults">Import results</button>
+              <input id="resultsFile" type="file" accept=".json,application/json" hidden />
+              <button id="saveBackendJob">Save job</button>
+              <button id="exportJob">Download job</button>
+              <button id="copyPayload">Copy job</button>
+            </div>
+          </details>
+          <div hidden>
+            <input id="simulationRadius" type="range" value="5000" />
+            <span id="simulationRadiusValue">5000 m</span>
+            <input id="ignitionDistance" type="range" value="4500" />
+            <span id="ignitionDistanceValue">4500 m</span>
+            <input id="windSpeed" type="range" value="8" />
+            <span id="windSpeedValue">8 m/s</span>
+            <select id="optimizationGoal"><option value="minimize_firebreak_length"></option></select>
+            <select id="successCondition"><option value="no_burn_inside_polygon"></option></select>
           </div>
         </section>
       </aside>
@@ -117,48 +190,86 @@
       <section class="map-workspace">
         <div class="topbar">
           <nav class="tabs" aria-label="Views">
-            <button class="tab active" data-view="setup">Farm map</button>
-            <button class="tab" data-view="baseline">Fire risk</button>
-            <button class="tab" data-view="firebreak">Firebreaks</button>
-            <button class="tab" data-view="compare">Options</button>
+            <button class="tab active" data-view="setup">Overview</button>
+            <button class="tab" data-view="baseline">7-day risk</button>
+            <button class="tab" data-view="firebreak">Action plan</button>
+            <button class="tab" data-view="alerts">Alert mode</button>
             <button class="tab" data-view="report">Report</button>
+            <button class="tab" data-view="compare">Details</button>
           </nav>
           <div class="map-legend">
             <span><i class="protected"></i>Farm</span>
-            <span><i class="ignition"></i>Test fires</span>
-            <span><i class="fire"></i>Risk path</span>
-            <span><i class="break"></i>Firebreak</span>
+            <span><i class="asset"></i>Assets</span>
+            <span><i class="fire"></i>Risk</span>
+            <span><i class="break"></i>Action line</span>
+            <span><i class="water"></i>Water</span>
           </div>
         </div>
 
-        <div class="map-stage">
-          <canvas id="mapCanvas" width="1400" height="900" aria-label="Interactive planning map"></canvas>
-          <div class="quick-card" aria-live="polite">
-            <span>Current task</span>
-            <strong id="quickTask">Mark your farm boundary</strong>
-            <p id="quickDetail">Tap each corner of the farm. Use at least 3 points.</p>
+        <div class="stage-grid">
+          <div class="map-stage">
+            <canvas id="mapCanvas" width="1400" height="900" aria-label="Interactive farm planning map"></canvas>
+            <div class="quick-card" aria-live="polite">
+              <span>Next best action</span>
+              <strong id="quickTask">Draw your farm boundary</strong>
+              <p id="quickDetail">Tap corners on the map. Add only key assets that affect decisions.</p>
+            </div>
+            <div class="map-hud">
+              <span id="cursorReadout">Lon -, Lat -</span>
+              <span id="mapHint">Tap to add boundary points</span>
+            </div>
           </div>
-          <div class="map-hud">
-            <span id="cursorReadout">Lon -, Lat -</span>
-            <span id="mapHint">Click to add polygon vertices</span>
+
+          <div class="terrain-stage" aria-label="Farm risk preview">
+            <canvas id="terrainCanvas" width="1100" height="680"></canvas>
+            <div class="sim-overlay">
+              <span>Farm Risk Preview</span>
+              <strong id="simClock">T+00:00</strong>
+              <p id="simNarrative">Run the advisory to see risk before and after actions.</p>
+            </div>
+            <div class="terrain-label">
+              <b>Why this matters</b>
+              <span>Weather, slope, fuels, assets, and calendar timing are converted into farm tasks.</span>
+            </div>
+            <div class="sim-strip">
+              <span>Now</span>
+              <progress id="simProgress" max="1" value="0"></progress>
+              <span>Action window</span>
+            </div>
           </div>
         </div>
       </section>
 
-      <aside class="results-panel" aria-label="Results and handoff">
+      <aside class="results-panel" aria-label="Farm advisory results">
         <section class="panel view-panel" data-panel="setup">
           <div class="panel-title">
-            <h2>Job Summary</h2>
-            <p>This is the exact JSON the backend needs.</p>
+            <h2>Today’s Farm Advisory</h2>
+            <p>Plain-language tasks based on weather, farm assets, and calendar timing.</p>
           </div>
-          <pre id="payloadPreview"></pre>
+          <div class="score-hero">
+            <div><span>Current risk</span><strong id="currentRiskScore">-</strong></div>
+            <div><span>After actions</span><strong id="improvedRiskScore">-</strong></div>
+            <div><span>Risk reduction</span><strong id="riskReductionPct">-</strong></div>
+            <div><span>Land at risk</span><strong id="landAtRiskPct">-</strong></div>
+          </div>
+          <div class="conditions-strip" aria-label="Current farm conditions">
+            <span>Wind <b id="feedWind">8 m/s WSW</b></span>
+            <span>Humidity <b id="feedHumidity">24%</b></span>
+            <span>Temp <b id="feedTemp">83 F</b></span>
+            <span>Elevation <b id="feedElevation">Preview</b></span>
+            <span>Risk <b id="feedRisk">Moderate</b></span>
+            <span hidden>Fuel <b id="feedFuel">Brush / grass</b></span>
+            <span hidden id="windSourceText">Manual preview value.</span>
+          </div>
+          <div class="recommendation-list" id="recommendationList"></div>
         </section>
 
         <section class="panel view-panel hidden" data-panel="baseline">
           <div class="panel-title">
-            <h2>Fire Risk Without New Breaks</h2>
-            <p>Shows how many test fires may reach the marked land.</p>
+            <h2>7-Day Risk Forecast</h2>
+            <p>Mock forecast bands turn weather into operational timing.</p>
           </div>
+          <div class="forecast-list" id="forecastList"></div>
           <dl class="score-list">
             <div><dt>Risky test fires</dt><dd id="baselineFailed">-</dd></div>
             <div><dt>Farm area at risk</dt><dd id="baselineBurned">-</dd></div>
@@ -169,8 +280,8 @@
 
         <section class="panel view-panel hidden" data-panel="firebreak">
           <div class="panel-title">
-            <h2>Recommended Firebreak Plan</h2>
-            <p>Lines on the map show where clearing is most useful.</p>
+            <h2>Minimal-Disruption Action Plan</h2>
+            <p>Smallest changes that reduce the most agricultural wildfire risk.</p>
           </div>
           <dl class="score-list">
             <div><dt>Plan</dt><dd id="recommendedLayout">-</dd></div>
@@ -179,22 +290,32 @@
             <div><dt>Cost</dt><dd id="layoutCost">-</dd></div>
           </dl>
           <div id="segmentList" class="scenario-list"></div>
+          <div class="build-list" id="buildList"></div>
         </section>
 
-        <section class="panel view-panel hidden" data-panel="compare">
+        <section class="panel view-panel hidden alert-panel" data-panel="alerts">
           <div class="panel-title">
-            <h2>Compare Firebreak Options</h2>
-            <p>Lower score means a better fit for your selected goal.</p>
+            <h2>Alert Mode</h2>
+            <p>Early actions for smoke, livestock, irrigation, harvest, and labor.</p>
           </div>
-          <div class="compare-list" id="compareList"></div>
+          <div class="alert-list" id="alertList"></div>
         </section>
 
         <section class="panel view-panel hidden" data-panel="report">
           <div class="panel-title">
             <h2>Plain-English Report</h2>
-            <p>Use this summary when discussing the plan with a crew or advisor.</p>
+            <p>Share with a crew, advisor, or farm manager.</p>
           </div>
           <textarea id="reportText" readonly></textarea>
+        </section>
+
+        <section class="panel view-panel hidden" data-panel="compare">
+          <div class="panel-title">
+            <h2>Technical Details</h2>
+            <p>Optional payload and layout scoring.</p>
+          </div>
+          <div class="compare-list" id="compareList"></div>
+          <pre id="payloadPreview"></pre>
         </section>
       </aside>
     </main>
@@ -202,15 +323,8 @@
     <div class="mobile-action-bar" aria-label="Mobile actions">
       <button id="mobileSample">Sample</button>
       <button id="mobileUndo">Undo</button>
-      <button class="primary" id="mobileRun">Check risk</button>
+      <button class="primary" id="mobileRun">Update</button>
     </div>
-
-    <template id="scenarioTemplate">
-      <article class="scenario-card">
-        <strong></strong>
-        <span></span>
-      </article>
-    </template>
 
     <script src="./app.js"></script>
   </body>
