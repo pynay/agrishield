@@ -20,6 +20,13 @@ def point_at_bearing(origin: Point, bearing_deg: float, distance: float) -> Poin
     return Point(origin.x + distance * math.cos(theta), origin.y + distance * math.sin(theta))
 
 
+def bearing_between_points(origin: Point, target: Point) -> float:
+    """Compass bearing from `origin` to `target` in projected coordinates."""
+    dx = target.x - origin.x
+    dy = target.y - origin.y
+    return (90.0 - math.degrees(math.atan2(dy, dx))) % 360.0
+
+
 def nearest_point_on(geom: BaseGeometry, ref: Point) -> Point:
     """Closest point on `geom` to `ref`."""
     snapped, _ = nearest_points(geom, ref)

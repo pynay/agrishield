@@ -112,6 +112,81 @@ def validate_cmd(job_dir: Path) -> None:
         raise click.ClickException("Validation failed")
 
 
+@main.command("elmfire")
+@click.argument("job_json", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("job_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--executable", default=None,
+              help="ELMFIRE executable name or path.")
+@click.option("--wsl/--native", default=True,
+              help="Run the Linux ELMFIRE executable through WSL, or run natively.")
+@click.option("--wsl-distro", default="Ubuntu",
+              help="WSL distro to use when --wsl is enabled.")
+@click.option("--out", "out_dir", type=click.Path(path_type=Path), default=None,
+              help="Output directory. Default: <job_dir>/elmfire_no_firebreak/")
+@click.option("--protected-polygon-crs", default="EPSG:4326",
+              help="CRS of the input protected polygon (default EPSG:4326).")
+@click.option("--wind-speed-mps", default=6.7, type=float,
+              help="Uniform 20-ft wind speed in m/s; written to ELMFIRE as mph.")
+@click.option("--simulation-tstop-s", default=21_600.0, type=float,
+              help="Simulation stop time in seconds.")
+@click.option("--simulation-dt-s", default=30.0, type=float,
+              help="Initial simulation timestep in seconds.")
+@click.option("--dump-interval-s", default=3_600.0, type=float,
+              help="ELMFIRE output dump interval in seconds.")
+@click.option("--timeout-s", default=None, type=float,
+              help="Optional timeout per ELMFIRE run.")
+def elmfire_cmd(
+    job_json: Path,
+    job_dir: Path,
+    executable: str | None,
+    wsl: bool,
+    wsl_distro: str,
+    out_dir: Path | None,
+    protected_polygon_crs: str,
+    wind_speed_mps: float,
+    simulation_tstop_s: float,
+    simulation_dt_s: float,
+    dump_interval_s: float,
+    timeout_s: float | None,
+) -> None:
+    """Run 8 no-firebreak ELMFIRE simulations from an existing preprocessed job."""
+    from wildfire_preproc.elmfire import (
+        SubprocessElmfireRunner,
+        WslElmfireRunner,
+        run_no_firebreak_elmfire_ensemble,
+    )
+
+    cfg = JobConfig.from_json_file(job_json)
+    if executable is None:
+        executable_path = (
+            Path.cwd() / "elmfire" / "build" / "linux" / "bin" / "elmfire_2025.0212"
+        )
+    else:
+        executable_path = Path(executable)
+    if wsl:
+        runner = WslElmfireRunner(
+            executable=executable_path,
+            distro=wsl_distro,
+            timeout_s=timeout_s,
+        )
+    else:
+        runner = SubprocessElmfireRunner([str(executable_path)], timeout_s=timeout_s)
+    result = run_no_firebreak_elmfire_ensemble(
+        cfg=cfg,
+        job_dir=job_dir,
+        runner=runner,
+        protected_polygon_crs=protected_polygon_crs,
+        out_dir=out_dir,
+        wind_speed_mps=wind_speed_mps,
+        simulation_tstop_s=simulation_tstop_s,
+        simulation_dt_s=simulation_dt_s,
+        dump_interval_s=dump_interval_s,
+    )
+    passed = sum(run.ok for run in result.runs)
+    click.echo(f"ELMFIRE no-firebreak ensemble complete: {passed}/{len(result.runs)} passed")
+    click.echo(f"Outputs: {out_dir or job_dir / 'elmfire_no_firebreak'}")
+
+
 @main.command("sample")
 @click.option("--out", "out_dir", type=click.Path(path_type=Path), default=None)
 @click.option("-v", "--verbose", is_flag=True, default=False)
