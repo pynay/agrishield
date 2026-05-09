@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgriShield Firebreak Planner</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar" aria-label="Simulation controls">
+        <div class="brand-row">
+          <div>
+            <h1>AgriShield</h1>
+            <p>Wildfire simulation and firebreak planning</p>
+          </div>
+          <span class="status-pill" id="jobStatus">Draft</span>
+        </div>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Protected Land</h2>
+            <button class="icon-button" id="clearPolygon" title="Clear polygon" aria-label="Clear polygon">
+              ×
+            </button>
+          </div>
+          <div class="toolbar compact">
+            <button class="tool active" id="drawMode">Draw</button>
+            <button class="tool" id="samplePolygon">Sample</button>
+            <button class="tool" id="fitMap">Fit</button>
+          </div>
+          <dl class="metrics">
+            <div>
+              <dt>Vertices</dt>
+              <dd id="vertexCount">0</dd>
+            </div>
+            <div>
+              <dt>Area</dt>
+              <dd id="areaEstimate">0 ha</dd>
+            </div>
+          </dl>
+        </section>
+
+        <section class="panel">
+          <h2>Simulation Settings</h2>
+          <label>
+            <span>Simulation radius</span>
+            <input id="simulationRadius" type="range" min="1500" max="10000" step="250" value="5000" />
+            <strong id="simulationRadiusValue">5000 m</strong>
+          </label>
+          <label>
+            <span>Ignition distance</span>
+            <input id="ignitionDistance" type="range" min="1000" max="9500" step="250" value="4500" />
+            <strong id="ignitionDistanceValue">4500 m</strong>
+          </label>
+          <label>
+            <span>Wind speed</span>
+            <input id="windSpeed" type="range" min="0" max="25" step="0.5" value="8" />
+            <strong id="windSpeedValue">8 m/s</strong>
+          </label>
+          <label>
+            <span>Optimization goal</span>
+            <select id="optimizationGoal">
+              <option value="minimize_firebreak_length">Minimize firebreak length</option>
+              <option value="minimize_cost">Minimize estimated cost</option>
+              <option value="maximize_risk_reduction">Maximize risk reduction</option>
+            </select>
+          </label>
+          <label>
+            <span>Success condition</span>
+            <select id="successCondition">
+              <option value="no_burn_inside_polygon">No burn inside polygon</option>
+              <option value="reduce_burned_area_90pct">Reduce burned area 90%</option>
+              <option value="no_arrival_under_2h">No arrival under 2 hours</option>
+            </select>
+          </label>
+        </section>
+
+        <section class="panel">
+          <h2>Run Controls</h2>
+          <div class="action-grid">
+            <button class="primary" id="runSimulation">Run Simulation</button>
+            <button id="loadResults">Import Results</button>
+            <input id="resultsFile" type="file" accept=".json,application/json" hidden />
+            <button id="exportJob">Export Job JSON</button>
+            <button id="copyPayload">Copy Payload</button>
+          </div>
+        </section>
+      </aside>
+
+      <section class="map-workspace">
+        <div class="topbar">
+          <nav class="tabs" aria-label="Views">
+            <button class="tab active" data-view="setup">Setup</button>
+            <button class="tab" data-view="baseline">Baseline</button>
+            <button class="tab" data-view="firebreak">Firebreaks</button>
+            <button class="tab" data-view="compare">Compare</button>
+            <button class="tab" data-view="report">Report</button>
+          </nav>
+          <div class="map-legend">
+            <span><i class="protected"></i>Protected</span>
+            <span><i class="ignition"></i>Ignitions</span>
+            <span><i class="fire"></i>Spread</span>
+            <span><i class="break"></i>Firebreak</span>
+          </div>
+        </div>
+
+        <div class="map-stage">
+          <canvas id="mapCanvas" width="1400" height="900" aria-label="Interactive planning map"></canvas>
+          <div class="map-hud">
+            <span id="cursorReadout">Lon -, Lat -</span>
+            <span id="mapHint">Click to add polygon vertices</span>
+          </div>
+        </div>
+      </section>
+
+      <aside class="results-panel" aria-label="Results and handoff">
+        <section class="panel view-panel" data-panel="setup">
+          <h2>Backend Handoff</h2>
+          <pre id="payloadPreview"></pre>
+        </section>
+
+        <section class="panel view-panel hidden" data-panel="baseline">
+          <h2>Baseline Risk</h2>
+          <dl class="score-list">
+            <div><dt>Failed scenarios</dt><dd id="baselineFailed">-</dd></div>
+            <div><dt>Burned inside patch</dt><dd id="baselineBurned">-</dd></div>
+            <div><dt>Max flame length</dt><dd id="baselineFlame">-</dd></div>
+          </dl>
+          <div class="scenario-list" id="scenarioList"></div>
+        </section>
+
+        <section class="panel view-panel hidden" data-panel="firebreak">
+          <h2>Recommended Layout</h2>
+          <dl class="score-list">
+            <div><dt>Layout</dt><dd id="recommendedLayout">-</dd></div>
+            <div><dt>Segments</dt><dd id="segmentCount">-</dd></div>
+            <div><dt>Length</dt><dd id="layoutLength">-</dd></div>
+            <div><dt>Cost</dt><dd id="layoutCost">-</dd></div>
+          </dl>
+          <div id="segmentList" class="scenario-list"></div>
+        </section>
+
+        <section class="panel view-panel hidden" data-panel="compare">
+          <h2>Layout Comparison</h2>
+          <div class="compare-list" id="compareList"></div>
+        </section>
+
+        <section class="panel view-panel hidden" data-panel="report">
+          <h2>Report Summary</h2>
+          <textarea id="reportText" readonly></textarea>
+        </section>
+      </aside>
+    </main>
+
+    <template id="scenarioTemplate">
+      <article class="scenario-card">
+        <strong></strong>
+        <span></span>
+      </article>
+    </template>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

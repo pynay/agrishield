@@ -218,7 +218,7 @@ def run_no_firebreak_elmfire_ensemble(
             raise ValueError("ignition_points.geojson must contain point geometries")
 
         ignition_bearing = float(row.bearing_deg)
-        run_id = f"bearing_{int(round(ignition_bearing)):03d}"
+        run_id = f"bearing_{round(ignition_bearing):03d}"
         run_dir = out_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         run_inputs_dir = run_dir / "inputs"

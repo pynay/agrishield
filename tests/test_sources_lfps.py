@@ -30,11 +30,7 @@ def _zip_with_tif(tmp_path: Path) -> bytes:
 @responses.activate
 def test_lfps_fetches_layer_via_arcgis_job_workflow(tmp_path: Path):
     # Job submission
-    responses.add(
-        responses.POST,
-        "https://lfps.usgs.gov/api/job/submitJob",
-        json={"jobId": "abc123"},
-    )
+    responses.add(responses.GET, "https://lfps.usgs.gov/api/job/submit", json={"jobId": "abc123"})
     # Status poll
     responses.add(
         responses.GET,
@@ -49,7 +45,12 @@ def test_lfps_fetches_layer_via_arcgis_job_workflow(tmp_path: Path):
         content_type="application/zip",
     )
 
-    src = LfpsSource(cache_dir=tmp_path / "cache", landfire_version="LF2022")
+    src = LfpsSource(
+        cache_dir=tmp_path / "cache",
+        landfire_version="LF2022",
+        email="test@example.com",
+        poll_interval_s=0.0,
+    )
     out = src.fetch(LayerKey.FBFM40, bbox=(0.0, 0.0, 100.0, 100.0), dst_crs="EPSG:5070")
     assert out.exists()
     with rasterio.open(out) as ds:
@@ -58,10 +59,7 @@ def test_lfps_fetches_layer_via_arcgis_job_workflow(tmp_path: Path):
 
 @responses.activate
 def test_lfps_uses_cache_on_second_call(tmp_path: Path):
-    responses.add(
-        responses.POST, "https://lfps.usgs.gov/api/job/submitJob",
-        json={"jobId": "abc123"},
-    )
+    responses.add(responses.GET, "https://lfps.usgs.gov/api/job/submit", json={"jobId": "abc123"})
     responses.add(
         responses.GET, "https://lfps.usgs.gov/api/job/status",
         json={"Status": "Succeeded", "OutputFile": "https://example.test/result.zip"},
@@ -72,7 +70,12 @@ def test_lfps_uses_cache_on_second_call(tmp_path: Path):
         content_type="application/zip",
     )
 
-    src = LfpsSource(cache_dir=tmp_path / "cache", landfire_version="LF2022")
+    src = LfpsSource(
+        cache_dir=tmp_path / "cache",
+        landfire_version="LF2022",
+        email="test@example.com",
+        poll_interval_s=0.0,
+    )
     p1 = src.fetch(LayerKey.FBFM40, bbox=(0, 0, 100, 100), dst_crs="EPSG:5070")
     p2 = src.fetch(LayerKey.FBFM40, bbox=(0, 0, 100, 100), dst_crs="EPSG:5070")
     assert p1 == p2

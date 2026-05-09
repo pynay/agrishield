@@ -151,6 +151,7 @@ def elmfire_cmd(
 ) -> None:
     """Run 8 no-firebreak ELMFIRE simulations from an existing preprocessed job."""
     from wildfire_preproc.elmfire import (
+        ElmfireRunner,
         SubprocessElmfireRunner,
         WslElmfireRunner,
         run_no_firebreak_elmfire_ensemble,
@@ -163,6 +164,7 @@ def elmfire_cmd(
         )
     else:
         executable_path = Path(executable)
+    runner: ElmfireRunner
     if wsl:
         runner = WslElmfireRunner(
             executable=executable_path,
@@ -185,6 +187,41 @@ def elmfire_cmd(
     passed = sum(run.ok for run in result.runs)
     click.echo(f"ELMFIRE no-firebreak ensemble complete: {passed}/{len(result.runs)} passed")
     click.echo(f"Outputs: {out_dir or job_dir / 'elmfire_no_firebreak'}")
+
+
+@main.command("optimize-firebreaks")
+@click.argument("job_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--baseline-dir", type=click.Path(exists=True, file_okay=False, path_type=Path),
+              default=None, help="Baseline ELMFIRE output directory with scenario summaries.")
+@click.option("--out", "out_dir", type=click.Path(path_type=Path), default=None,
+              help="Output directory. Default: <job_dir>/firebreak_optimization/")
+@click.option("--max-layouts", default=6, type=int, help="Number of ranked layouts to export.")
+@click.option("--firebreak-width-m", default=60.0, type=float, help="Firebreak width in meters.")
+@click.option("--firebreak-cost-per-m", default=12.0, type=float,
+              help="Estimated construction cost per meter.")
+def optimize_firebreaks_cmd(
+    job_dir: Path,
+    baseline_dir: Path | None,
+    out_dir: Path | None,
+    max_layouts: int,
+    firebreak_width_m: float,
+    firebreak_cost_per_m: float,
+) -> None:
+    """Generate ranked firebreak layouts for an existing preprocessed job."""
+    from wildfire_preproc.optimization import FirebreakOptimizationConfig, optimize_firebreaks
+
+    result = optimize_firebreaks(
+        job_dir=job_dir,
+        baseline_dir=baseline_dir,
+        out_dir=out_dir,
+        config=FirebreakOptimizationConfig(
+            max_layouts=max_layouts,
+            firebreak_width_m=firebreak_width_m,
+            firebreak_cost_per_m=firebreak_cost_per_m,
+        ),
+    )
+    click.echo(f"Recommended layout: {result.recommended_layout_id}")
+    click.echo(f"Optimization summary: {result.output_path}")
 
 
 @main.command("sample")

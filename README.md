@@ -32,6 +32,33 @@ uv run mypy src
 uv run ruff check src tests
 ```
 
+## UI workspace
+
+The project includes a no-build browser UI in `web/` for project setup, polygon drawing,
+scenario settings, baseline/firebreak visualization, comparison, and JSON handoff.
+
+Run it locally:
+
+```bash
+python3 -m http.server 4173 --bind 127.0.0.1 --directory web
+```
+
+Open:
+
+```text
+http://127.0.0.1:4173/
+```
+
+The UI can export the backend job payload and import `firebreak_optimization.json`
+from the optimization step.
+
+Generate firebreak layouts for an existing preprocessed job:
+
+```bash
+uv run wildfire-preproc optimize-firebreaks jobs/YOUR_RUN/preprocessed \
+  --baseline-dir jobs/YOUR_RUN/preprocessed/elmfire_no_firebreak
+```
+
 The bundled sample AOI and the `wildfire-preproc sample` command are wired up but will fail at the LFPS fetch step until the submit URL is resolved (see below).
 
 ## End-to-end fire simulation app
